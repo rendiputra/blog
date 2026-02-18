@@ -1,0 +1,43 @@
+---
+interface Heading {
+    depth: number;
+    slug: string;
+    text: string;
+}
+
+interface Props {
+    headings: Heading[];
+}
+
+const { headings } = Astro.props;
+
+// Only show h2 and h3
+const filteredHeadings = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+---
+
+{
+    filteredHeadings.length > 0 && (
+        <nav aria-label="Table of Contents">
+            <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">
+                Daftar Isi
+            </h4>
+            <ul class="space-y-1 text-sm">
+                {filteredHeadings.map((heading) => (
+                    <li>
+                        <a
+                            href={`#${heading.slug}`}
+                            class:list={[
+                                "block py-1 transition-colors hover:text-sky-400 border-l-2",
+                                heading.depth === 2
+                                    ? "pl-3 text-slate-400 border-slate-700 hover:border-sky-400"
+                                    : "pl-6 text-slate-500 border-slate-800 hover:border-sky-400",
+                            ]}
+                        >
+                            {heading.text}
+                        </a>
+                    </li>
+                ))}
+            </ul>
+        </nav>
+    )
+}

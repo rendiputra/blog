@@ -1,0 +1,142 @@
+---
+import BaseLayout from "./BaseLayout.astro";
+import TableOfContents from "../components/TableOfContents.astro";
+import SeriesNav from "../components/SeriesNav.astro";
+import { Calendar, Tag } from "@lucide/astro";
+
+interface Props {
+    title: string;
+    description: string;
+    pubDate: Date;
+    tags?: string[];
+    headings: { depth: number; slug: string; text: string }[];
+    series?: string;
+    currentSlug?: string;
+}
+
+const {
+    title,
+    description,
+    pubDate,
+    tags = [],
+    headings,
+    series,
+    currentSlug,
+} = Astro.props;
+
+const formattedDate = pubDate.toLocaleDateString("id-ID", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+});
+---
+
+<BaseLayout title={`${title} — TechBlog`} description={description}>
+    <div class="max-w-6xl mx-auto px-4 py-10">
+        <!-- Article Header -->
+        <header class="max-w-[65ch] mb-8">
+            <h1
+                class="text-3xl md:text-4xl font-bold text-slate-100 tracking-tight leading-tight mb-4"
+            >
+                {title}
+            </h1>
+            <p class="text-lg text-slate-400 mb-4">{description}</p>
+            <div
+                class="flex flex-wrap items-center gap-4 text-sm text-slate-500"
+            >
+                <span class="flex items-center gap-1.5">
+                    <Calendar size={14} />
+                    <time datetime={pubDate.toISOString()}>{formattedDate}</time
+                    >
+                </span>
+                {
+                    tags.length > 0 && (
+                        <span class="flex items-center gap-1.5 flex-wrap">
+                            <Tag size={14} />
+                            {tags.map((tag) => (
+                                <span class="px-2 py-0.5 rounded-md bg-slate-800 text-slate-400 text-xs">
+                                    {tag}
+                                </span>
+                            ))}
+                        </span>
+                    )
+                }
+            </div>
+        </header>
+
+        <!-- Grid Layout: Content + Sidebar -->
+        <div
+            class="flex flex-col lg:grid lg:grid-cols-[minmax(0,65ch)_250px] lg:gap-12 items-start"
+        >
+            <!-- Main Content -->
+            <article
+                class="prose prose-invert prose-lg max-w-none
+        prose-headings:font-bold prose-headings:tracking-tight prose-headings:text-slate-100
+        prose-p:leading-[1.7] prose-p:text-[1.1rem]
+        prose-a:text-sky-400 prose-a:no-underline hover:prose-a:underline
+        prose-code:text-sky-400 prose-code:before:content-none prose-code:after:content-none
+        prose-pre:bg-slate-950 prose-pre:border prose-pre:border-slate-800 prose-pre:rounded-xl
+        prose-img:rounded-xl prose-img:border prose-img:border-slate-800
+        prose-blockquote:border-sky-400/50 prose-blockquote:text-slate-400
+        prose-strong:text-slate-200
+        prose-hr:border-slate-800
+        w-full"
+            >
+                <slot />
+            </article>
+
+            <!-- Right Sidebar -->
+            <aside
+                class="w-full lg:w-[250px] mt-10 lg:mt-0 lg:sticky lg:top-20 space-y-8"
+            >
+                <TableOfContents headings={headings} />
+                {
+                    series && currentSlug && (
+                        <div class="border-t border-slate-800 pt-6">
+                            <SeriesNav
+                                seriesName={series}
+                                currentSlug={currentSlug}
+                            />
+                        </div>
+                    )
+                }
+            </aside>
+        </div>
+    </div>
+
+    <!-- Copy Code Button Script -->
+    <script>
+        document.querySelectorAll("pre").forEach((pre) => {
+            // Create wrapper
+            const wrapper = document.createElement("div");
+            wrapper.className = "relative group";
+            pre.parentNode?.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+
+            // Create copy button
+            const btn = document.createElement("button");
+            btn.className =
+                "absolute top-2 right-2 p-1.5 rounded-md bg-slate-700/50 text-slate-400 text-xs opacity-0 group-hover:opacity-100 transition-all hover:bg-slate-700 hover:text-slate-200";
+            btn.textContent = "Copy";
+            btn.setAttribute("aria-label", "Copy code");
+
+            btn.addEventListener("click", async () => {
+                const code = pre.querySelector("code");
+                const text = code?.textContent ?? "";
+                try {
+                    await navigator.clipboard.writeText(text);
+                    btn.textContent = "Copied!";
+                    btn.classList.add("text-green-400");
+                    setTimeout(() => {
+                        btn.textContent = "Copy";
+                        btn.classList.remove("text-green-400");
+                    }, 2000);
+                } catch {
+                    btn.textContent = "Error";
+                }
+            });
+
+            wrapper.appendChild(btn);
+        });
+    </script>
+</BaseLayout>

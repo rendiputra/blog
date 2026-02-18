@@ -1,0 +1,40 @@
+---
+title: "Laravel REST API - Part 2: CRUD Operations"
+description: "Lorem ipsum dolor sit amet, implementasi CRUD pada Laravel REST API."
+pubDate: 2026-02-05
+tags: ["laravel", "php", "api"]
+series: "Laravel REST API"
+order: 2
+---
+
+## Membuat Model & Migration
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+
+```bash
+php artisan make:model Post -mcr
+```
+
+## Controller CRUD
+
+Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.
+
+```php
+public function index()
+{
+    return Post::all();
+}
+
+public function store(Request $request)
+{
+    return Post::create($request->all());
+}
+```
+
+## Testing Endpoint
+
+Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
+
+## Kesimpulan
+
+Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.

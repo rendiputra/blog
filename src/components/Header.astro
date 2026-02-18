@@ -1,0 +1,110 @@
+---
+import { Search, Github, Menu, X } from "@lucide/astro";
+
+const navLinks = [
+    { href: "/artikel", label: "Artikel" },
+    { href: "/tutorial", label: "Tutorial" },
+];
+
+const currentPath = Astro.url.pathname;
+---
+
+<header
+    class="sticky top-0 z-50 border-b border-slate-800/50 bg-slate-900/80 backdrop-blur-xl"
+>
+    <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+        <!-- Logo -->
+        <a
+            href="/"
+            class="text-xl font-bold text-slate-100 tracking-tight hover:text-sky-400 transition-colors"
+        >
+            Tech<span class="text-sky-400">Blog</span>
+        </a>
+
+        <!-- Desktop Nav -->
+        <nav class="hidden md:flex items-center gap-1">
+            {
+                navLinks.map((link) => (
+                    <a
+                        href={link.href}
+                        class:list={[
+                            "px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+                            currentPath.startsWith(link.href)
+                                ? "text-sky-400 bg-sky-400/10"
+                                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50",
+                        ]}
+                    >
+                        {link.label}
+                    </a>
+                ))
+            }
+        </nav>
+
+        <!-- Actions -->
+        <div class="flex items-center gap-2">
+            <button
+                aria-label="Search"
+                class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition-colors"
+            >
+                <Search size={20} />
+            </button>
+            <a
+                href="https://github.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="GitHub"
+                class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition-colors"
+            >
+                <Github size={20} />
+            </a>
+
+            <!-- Mobile Menu Toggle -->
+            <button
+                id="mobile-menu-toggle"
+                class="md:hidden p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition-colors"
+                aria-label="Toggle menu"
+            >
+                <Menu size={20} id="menu-icon-open" />
+                <X size={20} id="menu-icon-close" class="hidden" />
+            </button>
+        </div>
+    </div>
+
+    <!-- Mobile Nav -->
+    <nav
+        id="mobile-nav"
+        class="hidden md:hidden border-t border-slate-800/50 bg-slate-900/95 backdrop-blur-xl"
+    >
+        <div class="max-w-6xl mx-auto px-4 py-3 flex flex-col gap-1">
+            {
+                navLinks.map((link) => (
+                    <a
+                        href={link.href}
+                        class:list={[
+                            "px-4 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                            currentPath.startsWith(link.href)
+                                ? "text-sky-400 bg-sky-400/10"
+                                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50",
+                        ]}
+                    >
+                        {link.label}
+                    </a>
+                ))
+            }
+        </div>
+    </nav>
+</header>
+
+<script>
+    const toggle = document.getElementById("mobile-menu-toggle");
+    const nav = document.getElementById("mobile-nav");
+    const iconOpen = document.getElementById("menu-icon-open");
+    const iconClose = document.getElementById("menu-icon-close");
+
+    toggle?.addEventListener("click", () => {
+        const isOpen = !nav?.classList.contains("hidden");
+        nav?.classList.toggle("hidden");
+        iconOpen?.classList.toggle("hidden");
+        iconClose?.classList.toggle("hidden");
+    });
+</script>
