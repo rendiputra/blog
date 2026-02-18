@@ -1,14 +1,16 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import { getCollection } from "astro:content";
+import { getCollection, type CollectionEntry } from "astro:content";
 import { ArrowRight, BookOpen, Code } from "@lucide/astro";
 
 const allArtikel = (await getCollection("artikel")).sort(
-	(a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
+	(a: CollectionEntry<"artikel">, b: CollectionEntry<"artikel">) =>
+		b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
 );
 
 const allTutorial = (await getCollection("tutorial")).sort(
-	(a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
+	(a: CollectionEntry<"tutorial">, b: CollectionEntry<"tutorial">) =>
+		b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
 );
 ---
 
