@@ -36,11 +36,13 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
         <!-- Article Header -->
         <header class="max-w-[65ch] mb-8">
             <h1
-                class="text-3xl md:text-4xl font-bold text-slate-100 tracking-tight leading-tight mb-4"
+                class="text-3xl md:text-4xl font-bold text-slate-900 dark:text-slate-100 tracking-tight leading-tight mb-4"
             >
                 {title}
             </h1>
-            <p class="text-lg text-slate-400 mb-4">{description}</p>
+            <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                {description}
+            </p>
             <div
                 class="flex flex-wrap items-center gap-4 text-sm text-slate-500"
             >
@@ -54,7 +56,7 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
                         <span class="flex items-center gap-1.5 flex-wrap">
                             <Tag size={14} />
                             {tags.map((tag) => (
-                                <span class="px-2 py-0.5 rounded-md bg-slate-800 text-slate-400 text-xs">
+                                <span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-xs transition-colors">
                                     {tag}
                                 </span>
                             ))}
@@ -70,16 +72,16 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
         >
             <!-- Main Content -->
             <article
-                class="prose prose-invert prose-lg max-w-none
-        prose-headings:font-bold prose-headings:tracking-tight prose-headings:text-slate-100
+                class="prose dark:prose-invert prose-lg max-w-none
+        prose-headings:font-bold prose-headings:tracking-tight prose-headings:text-slate-900 dark:prose-headings:text-slate-100
         prose-p:leading-[1.7] prose-p:text-[1.1rem]
         prose-a:text-sky-400 prose-a:no-underline hover:prose-a:underline
         prose-code:text-sky-400 prose-code:before:content-none prose-code:after:content-none
-        prose-pre:bg-slate-950 prose-pre:border prose-pre:border-slate-800 prose-pre:rounded-xl
-        prose-img:rounded-xl prose-img:border prose-img:border-slate-800
-        prose-blockquote:border-sky-400/50 prose-blockquote:text-slate-400
-        prose-strong:text-slate-200
-        prose-hr:border-slate-800
+        prose-pre:bg-slate-100 prose-pre:border prose-pre:border-slate-200 prose-pre:rounded-xl dark:prose-pre:bg-slate-950 dark:prose-pre:border-slate-800
+        prose-img:rounded-xl prose-img:border prose-img:border-slate-200 dark:prose-img:border-slate-800
+        prose-blockquote:border-sky-400/50 prose-blockquote:text-slate-600 dark:prose-blockquote:text-slate-400
+        prose-strong:text-slate-900 dark:prose-strong:text-slate-200
+        prose-hr:border-slate-200 dark:prose-hr:border-slate-800
         w-full"
             >
                 <slot />
@@ -92,7 +94,7 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
                 <TableOfContents headings={headings} />
                 {
                     series && currentSlug && (
-                        <div class="border-t border-slate-800 pt-6">
+                        <div class="border-t border-slate-200 dark:border-slate-800 pt-6 transition-colors">
                             <SeriesNav
                                 seriesName={series}
                                 currentSlug={currentSlug}
@@ -116,7 +118,7 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
             // Create copy button
             const btn = document.createElement("button");
             btn.className =
-                "absolute top-2 right-2 p-1.5 rounded-md bg-slate-700/50 text-slate-400 text-xs opacity-0 group-hover:opacity-100 transition-all hover:bg-slate-700 hover:text-slate-200";
+                "absolute top-2 right-2 p-1.5 rounded-md bg-slate-200/50 text-slate-600 dark:bg-slate-700/50 dark:text-slate-400 text-xs opacity-0 group-hover:opacity-100 transition-all hover:bg-slate-300 hover:text-slate-800 dark:hover:bg-slate-700 dark:hover:text-slate-200";
             btn.textContent = "Copy";
             btn.setAttribute("aria-label", "Copy code");
 

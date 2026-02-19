@@ -1,21 +1,23 @@
 ---
-import Header from '../components/Header.astro';
-import '@fontsource/inter/400.css';
-import '@fontsource/inter/500.css';
-import '@fontsource/inter/600.css';
-import '@fontsource/inter/700.css';
-import '@fontsource/jetbrains-mono/400.css';
+import Header from "../components/Header.astro";
+import ThemeScript from "../components/ThemeScript.astro";
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/jetbrains-mono/400.css";
 
 interface Props {
   title: string;
   description?: string;
 }
 
-const { title, description = 'Tech documentation, tutorials, dan artikel.' } = Astro.props;
+const { title, description = "Tech documentation, tutorials, dan artikel." } =
+  Astro.props;
 ---
 
 <!doctype html>
-<html lang="id" class="dark">
+<html lang="id">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -23,13 +25,18 @@ const { title, description = 'Tech documentation, tutorials, dan artikel.' } = A
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="generator" content={Astro.generator} />
     <title>{title}</title>
+    <ThemeScript />
   </head>
-  <body class="bg-slate-900 text-slate-300 font-sans min-h-screen antialiased">
+  <body
+    class="bg-white text-slate-700 dark:bg-slate-900 dark:text-slate-300 font-sans min-h-screen antialiased transition-colors duration-300"
+  >
     <Header />
     <main>
       <slot />
     </main>
-    <footer class="border-t border-slate-800 py-8 mt-16">
+    <footer
+      class="border-t border-slate-200 dark:border-slate-800 py-8 mt-16 transition-colors"
+    >
       <div class="max-w-6xl mx-auto px-4 text-center text-sm text-slate-500">
         <p>&copy; {new Date().getFullYear()} TechBlog. Built with Astro.</p>
       </div>
