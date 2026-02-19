@@ -3,8 +3,8 @@ import { Search, Github, Menu, X } from "@lucide/astro";
 import ThemeToggle from "./ThemeToggle.astro";
 
 const navLinks = [
-    { href: "/artikel", label: "Artikel" },
-    { href: "/tutorial", label: "Tutorial" },
+    { href: "/blog/artikel", label: "Artikel" },
+    { href: "/blog/tutorial", label: "Tutorial" },
 ];
 
 const currentPath = Astro.url.pathname;
@@ -16,7 +16,7 @@ const currentPath = Astro.url.pathname;
     <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
         <!-- Logo -->
         <a
-            href="/"
+            href="/blog"
             class="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight hover:text-sky-400 transition-colors"
         >
             Tech<span class="text-sky-400">Blog</span>
@@ -50,7 +50,7 @@ const currentPath = Astro.url.pathname;
                 <Search size={20} />
             </button>
             <a
-                href="https://github.com"
+                href="https://github.com/rendiputra"
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label="GitHub"
