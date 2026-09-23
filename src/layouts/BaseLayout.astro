@@ -15,6 +15,9 @@ interface Props {
   ogImage?: string;
   ogType?: "website" | "article";
   pubDate?: Date;
+  author?: string;
+  tags?: string[];
+  canonicalUrl?: string;
 }
 
 const {
@@ -23,12 +26,70 @@ const {
   ogImage,
   ogType = "website",
   pubDate,
+  author = "TechBlog",
+  tags = [],
+  canonicalUrl,
 } = Astro.props;
 
 const siteUrl = "https://blog.rendiputrapradana.workers.dev";
 const siteName = "TechBlog";
 const defaultOgImage = `${siteUrl}/og-default.svg`;
 const currentUrl = new URL(Astro.url.pathname, siteUrl).href;
+const canonical = canonicalUrl || currentUrl;
+
+// JSON-LD structured data
+const isArticle = ogType === "article";
+const jsonLd = isArticle
+  ? JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Article",
+      headline: title,
+      description: description,
+      image: ogImage || defaultOgImage,
+      author: {
+        "@type": "Person",
+        name: author,
+        url: siteUrl,
+      },
+      publisher: {
+        "@type": "Organization",
+        name: siteName,
+        logo: {
+          "@type": "ImageObject",
+          url: `${siteUrl}/favicon.svg`,
+        },
+      },
+      datePublished: pubDate?.toISOString(),
+      dateModified: pubDate?.toISOString(),
+      mainEntityOfPage: {
+        "@type": "WebPage",
+        "@id": canonical,
+      },
+      keywords: tags.join(", "),
+    })
+  : JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      name: siteName,
+      url: siteUrl,
+      description: description,
+      publisher: {
+        "@type": "Organization",
+        name: siteName,
+        logo: {
+          "@type": "ImageObject",
+          url: `${siteUrl}/favicon.svg`,
+        },
+      },
+      potentialAction: {
+        "@type": "SearchAction",
+        target: {
+          "@type": "EntryPoint",
+          urlTemplate: `${siteUrl}/?q={search_term_string}`,
+        },
+        "query-input": "required name=search_term_string",
+      },
+    });
 ---
 
 <!doctype html>
@@ -36,12 +97,35 @@ const currentUrl = new URL(Astro.url.pathname, siteUrl).href;
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content={description} />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="generator" content={Astro.generator} />
-    <title>{title}</title>
 
-    <!-- Open Graph / Social Media -->
+    <!-- Primary Meta Tags -->
+    <title>{title}</title>
+    <meta name="title" content={title} />
+    <meta name="description" content={description} />
+    <meta name="author" content={author} />
+    {tags.length > 0 && <meta name="keywords" content={tags.join(", ")} />}
+    <meta name="generator" content={Astro.generator} />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="googlebot" content="index, follow" />
+
+    <!-- Canonical URL -->
+    <link rel="canonical" href={canonical} />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+    <!-- Theme Color -->
+    <meta name="theme-color" content="#0ea5e9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
+
+    <!-- Mobile Web App -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content={siteName} />
+
+    <!-- Open Graph / Facebook -->
     <meta property="og:type" content={ogType} />
     <meta property="og:url" content={currentUrl} />
     <meta property="og:title" content={title} />
@@ -49,8 +133,10 @@ const currentUrl = new URL(Astro.url.pathname, siteUrl).href;
     <meta property="og:image" content={ogImage || defaultOgImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={title} />
     <meta property="og:site_name" content={siteName} />
     <meta property="og:locale" content="id_ID" />
+    <meta property="fb:app_id" content="" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -58,11 +144,21 @@ const currentUrl = new URL(Astro.url.pathname, siteUrl).href;
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage || defaultOgImage} />
+    <meta name="twitter:image:alt" content={title} />
+    <meta name="twitter:site" content="@rendiputra" />
+    <meta name="twitter:creator" content="@rendiputra" />
 
-    <!-- Article specific -->
+    <!-- Article Specific -->
     {pubDate && <meta property="article:published_time" content={pubDate.toISOString()} />}
+    {pubDate && <meta property="article:modified_time" content={pubDate.toISOString()} />}
+    {author && <meta property="article:author" content={author} />}
+    {tags.map((tag) => <meta property="article:tag" content={tag} />)}
+
+    <!-- JSON-LD Structured Data -->
+    <script type="application/ld+json" set:html={jsonLd} />
 
     <ThemeScript />
+
     <style is:global>
       /* Scrollbar styles for TOC */
       .scrollbar-thin::-webkit-scrollbar {
