@@ -1,0 +1,600 @@
+---
+title: "Part 1: Docker Compose 101: Jalanin Node.js API dan PostgreSQL dengan Sekali Command"
+description: "Tutorial docker-compose.yml buat pemula. Lo bakal bikin setup multi-container dimana Node.js API dan PostgreSQL jalan bareng, dengan satu command docker-compose up. Nggak ribet, tinggal copy-paste."
+pubDate: 2026-07-15
+tags: ["docker", "docker-compose", "tutorial", "devops", "nodejs", "postgresql", "backend"]
+series: "Nyelamatin Diri dari 'Works on My Machine'"
+order: 1
+coverImage: "https://images.unsplash.com/photo-1605745341112-85968b19335b?w=1200&h=630&fit=crop"
+---
+
+Di artikel sebelumnya tentang XAMPP vs Docker, lo udah belajar kenapa Docker itu solusi buat local development. Tapi itu mostly single container.
+
+Sekarang? Lo bakal belajar sesuatu yang lebih powerful | **Docker Compose**.
+
+Di part 1 ini, gue bakal tunjukin cara setup **Node.js API + PostgreSQL** dalam satu docker-compose.yml. Sekali jalanin `docker-compose up`, semua langsung jalan.
+
+## Apa Itu Docker Compose?
+
+Docker Compose itu tool buat define dan run **multi-container** Docker applications.
+
+Tanpa Compose:
+```
+Lo harus jalanin 5 container satu-satu:
+| docker run postgres
+| docker run redis
+| docker run nginx
+| docker run node-api
+| docker run worker
+
+Problem:
+| - 5 terminal tabs
+| - Network configuration manual
+| - Start/stop satu-satu
+| - Mount volumes manual
+| - Port forwarding satu-satu
+```
+
+Dengan Compose:
+```bash
+# Satu command, semua jalan
+docker-compose up -d
+
+# Semua container langsung jalan
+# Network auto-configured
+# Volumes auto-mounted
+# Logs di satu tempat
+```
+
+**The difference:** dari 5 command jadi 1.
+
+## Studi Kasus: Node.js API + PostgreSQL
+
+Oke, sekarang lo bakal bikin setup real. Lo punya:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    docker-compose.yml                         │
+│                                                              │
+│   ┌──────────────────┐    ┌──────────────────┐             │
+│   │   Node.js API    │───▶│   PostgreSQL     │             │
+│   │   (Port 3000)   │    │   (Port 5432)    │             │
+│   └──────────────────┘    └──────────────────┘             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Project Structure
+
+Struktur project yang bakal lo bikin:
+
+```
+my-node-api/
+├── src/
+│   └── index.js
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── package.json
+└── .dockerignore
+```
+
+## Step 1: Buat Project Sederhana
+
+Oke, gue assume lo udah punya project Node.js. Kalo belum, quick setup:
+
+```bash
+mkdir my-node-api
+cd my-node-api
+npm init -y
+npm install express pg dotenv cors
+npm install -D nodemon
+```
+
+## Step 2: Buat Aplikasi Node.js
+
+```javascript
+// src/index.js
+const express = require('express');
+const { Pool } = require('pg');
+const cors = require('cors');
+require('dotenv').config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// PostgreSQL connection pool
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: process.env.DB_PORT,
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Get all users
+app.get('/api/users', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create user
+app.post('/api/users', async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const result = await pool.query(
+      'INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *',
+      [name, email]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create tables on startup
+async function initDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('Database initialized');
+  } catch (err) {
+    console.error('Database init error:', err.message);
+  }
+}
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, async () => {
+  await initDatabase();
+  console.log(`Server running on port ${PORT}`);
+});
+```
+
+## Step 3: Buat Dockerfile
+
+```dockerfile
+# Dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy source code
+COPY src/ ./src/
+
+# Expose port
+EXPOSE 3000
+
+# Start command
+CMD ["node", "src/index.js"]
+```
+
+**Kenapa pake `npm ci` bukan `npm install`?**
+- `npm ci` lebih cepat
+- Install sesuai package-lock.json (deterministic)
+- Clean install (hapus node_modules dulu)
+
+## Step 4: Buat docker-compose.yml
+
+Ini dia file utamanya:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: node-api
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=myapp
+      - DB_USER=postgres
+      - DB_PASSWORD=secretpassword
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_DB=myapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d myapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+**Penjelasan bagian-bagian penting:**
+
+```yaml
+# Build context | cari Dockerfile di folder mana
+build:
+  context: .
+  dockerfile: Dockerfile
+
+# Port forwarding | host:container
+ports:
+  - "3000:3000"
+
+# Environment variables
+environment:
+  - DB_HOST=postgres  # Ini hostname, bukan IP!
+  - DB_PORT=5432
+
+# Volume mounting | host:container
+volumes:
+  - ./src:/app/src  # Kode lu auto-reload pas edit
+
+# Wait for postgres before starting
+depends_on:
+  postgres:
+    condition: service_healthy
+
+# Network | biar container bisa talk satu sama lain
+networks:
+  - app-network
+
+# Health check | pastikan postgres udah ready sebelum API start
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U postgres -d myapp"]
+```
+
+## Step 5: Buat Environment File
+
+```bash
+# .env.example
+NODE_ENV=development
+PORT=3000
+
+# Database
+DB_HOST=postgres
+DB_PORT=5432
+DB_NAME=myapp
+DB_USER=postgres
+DB_PASSWORD=secretpassword
+```
+
+Lo bisa copy ke `.env`:
+
+```bash
+cp .env.example .env
+```
+
+**Penting:** JANGAN push `.env` ke GitHub. Pastikan udah ada di `.gitignore`:
+
+```bash
+# .gitignore
+.env
+.env.local
+.env.*.local
+```
+
+## Step 6: Buat .dockerignore
+
+```bash
+# .dockerignore
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.*
+README.md
+docker-compose.yml
+Dockerfile
+*.md
+```
+
+Ini bikin Docker build lebih cepat karena nggak copy file yang nggak perlu.
+
+## Step 7: Run Semua!
+
+Sekarang cuma perlu satu command:
+
+```bash
+# Start semua services
+docker-compose up -d
+
+# Kalo mau lihat logs
+docker-compose logs -f
+
+# Kalo mau lihat logs dari service tertentu
+docker-compose logs -f api
+docker-compose logs -f postgres
+```
+
+Verifikasi semua jalan:
+
+```bash
+# Cek status
+docker-compose ps
+
+# Output:
+# NAME                IMAGE               COMMAND                  SERVICE    CREATED          STATUS          PORTS
+# node-api            my-node-api-api    "docker-entrypoint…"   api        10 seconds ago   Up 8 seconds    0.0.0.0:3000->3000/tcp
+# postgres            postgres:16-alpine  "docker-entrypoint…"   postgres   10 seconds ago   Up 9 seconds    0.0.0.0:5432->5432/tcp
+```
+
+Test API:
+
+```bash
+# Health check
+curl http://localhost:3000/health
+
+# Create user
+curl -X POST http://localhost:3000/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Andi", "email": "andi@example.com"}'
+
+# Get all users
+curl http://localhost:3000/api/users
+```
+
+**Boom!** Lo udah punya full-stack setup dengan Docker Compose!
+
+## Useful Commands
+
+```bash
+# Start services
+docker-compose up -d
+
+# Start dengan rebuild
+docker-compose up -d --build
+
+# Stop services
+docker-compose down
+
+# Stop dan hapus volumes (WARNING: data di database kehapus!)
+docker-compose down -v
+
+# Stop dan hapus images
+docker-compose down --rmi all
+
+# Restart service tertentu
+docker-compose restart api
+
+# Scale service (tambah instances)
+docker-compose up -d --scale api=3
+
+# Execute command di container
+docker-compose exec api node src/index.js
+
+# Open shell di container
+docker-compose exec api sh
+
+# Open psql cli
+docker-compose exec postgres psql -U postgres -d myapp
+```
+
+## Common Issues dan Solusi
+
+### Issue 1: API can't connect to PostgreSQL
+
+```bash
+# Error:
+# Error: connect ECONNREFUSED 127.0.0.1:5432
+
+# Penyebab:
+# Lo pakai DB_HOST=localhost atau 127.0.0.1
+
+# Solusi:
+# Di docker-compose, pakai hostname = service name
+# DB_HOST=postgres (nama service di docker-compose.yml)
+```
+
+### Issue 2: PostgreSQL belum ready pas API start
+
+```bash
+# Error:
+# Error: Connection refused
+
+# Penyebab:
+# API mulai sebelum PostgreSQL selesai initialize
+
+# Solusi:
+# Pakai healthcheck + depends_on condition
+depends_on:
+  postgres:
+    condition: service_healthy
+
+# Plus healthcheck di postgres:
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U postgres"]
+```
+
+### Issue 3: Volume permission denied
+
+```bash
+# Error:
+# permission denied for directory /var/lib/postgresql/data
+
+# Solusi:
+# Tambahin user di postgres service
+postgres:
+  image: postgres:16-alpine
+  user: postgres  # atau
+  # Atau bikin volume named (bukan anonymous)
+  volumes:
+    - postgres_data:/var/lib/postgresql/data  # Named volume
+```
+
+### Issue 4: Port already in use
+
+```bash
+# Error:
+# Bind for 0.0.0.0:5432 failed: port is already allocated
+
+# Penyebab:
+# Ada PostgreSQL lain jalan di komputer lu
+
+# Solusi:
+# Stop PostgreSQL local
+# Atau ganti port di docker-compose:
+ports:
+  - "5433:5432"  # Host 5433, container 5432
+```
+
+## Bonus: Development vs Production
+
+Lo bisa punya multiple compose files:
+
+```bash
+# docker-compose.yml (base)
+# docker-compose.override.yml (development)
+# docker-compose.prod.yml (production)
+```
+
+### docker-compose.override.yml (Development)
+
+```yaml
+# docker-compose.override.yml
+# Auto-merge pas docker-compose up (development mode)
+# Tidak di-commit ke git
+
+services:
+  api:
+    build:
+      context: .
+      target: development
+    volumes:
+      - ./src:/app/src
+    environment:
+      - NODE_ENV=development
+    command: ["nodemon", "src/index.js"]
+
+  postgres:
+    ports:
+      - "5432:5432"
+```
+
+### docker-compose.prod.yml (Production)
+
+```yaml
+# docker-compose.prod.yml
+# Pakai: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  api:
+    build:
+      context: .
+      target: production
+    environment:
+      - NODE_ENV=production
+    restart: always
+    command: ["node", "src/index.js"]
+
+  postgres:
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+```
+
+Docker Compose auto-merge config files. Pretty neat!
+
+## Environment Variables di Compose
+
+Lo bisa baca environment variables dari `.env` file:
+
+```bash
+# .env
+DB_PASSWORD=secretpassword
+```
+
+```yaml
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    # Atau pakai shorthand:
+    # environment:
+    #   - POSTGRES_PASSWORD
+```
+
+**Important:** Variabel di `.env` harus ada pas `docker-compose up`. Kalo nggak, Docker Compose bakal error.
+
+## Kesimpulan
+
+Lo udah belajar:
+
+**Docker Compose basics:**
+- Apa itu Docker Compose dan kenapa butuh
+- Setup docker-compose.yml dengan services
+- Environment variables dan volumes
+- Health checks
+- Named volumes
+
+**Commands:**
+- docker-compose up/down
+- docker-compose logs
+- docker-compose exec
+- docker-compose restart
+
+**Best practices:**
+- Pakai hostname = service name buat inter-container communication
+- Health check sebelum start dependent service
+- Named volumes buat persist data
+- .dockerignore buat faster builds
+
+**Di Part 2**, gue bakal jelasin gimana network bridge antar container bekerja, dan gimana bikin inter-container communication yang lebih advanced. Stay tuned!
+
+See you di Part 2!
+
+---
+
+*Next: [Part 2] Docker Networks: Biar Container Lu Bisa Ngobrol Sesama Sendiri*

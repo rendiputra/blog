@@ -1,0 +1,878 @@
+---
+title: "Server Lu Kewalahan? Gini Cara Setup Load Balancer Pake Nginx"
+description: "Cape ngeliat aplikasi web lu yang molor pas traffic naik? Atau server yang tiba-tiba down? Waktu nya lu setup load balancer dengan Nginx. Tutorial lengkap dari basic sampe production-ready config."
+pubDate: 2026-05-18
+tags: ["nginx", "load-balancer", "devops", "infrastructure", "backend", "scaling", "high-availability"]
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Oke, skenario time.
+
+Lo punya aplikasi web yang mulai popular. Traffic naik. User mulai banyak. Dan kemudian:
+
+```
+Jam 8 pagi:
+User: "Aplikasi lu lemot banget!"
+
+Jam 9 pagi:
+User: "Error 503 Service Unavailable"
+
+Jam 10 pagi:
+Lo: *panic, SSH ke server*
+Lo: *htop* -> CPU 100%, Memory full, Swap kepake
+Lo: "Yaudah restart dulu..."
+
+Jam 10:01 pagi:
+Lo: *restart* -> Semua user di-boot, active sessions hilang
+User: "Kenapa gue logout sendiri?"
+
+Jam 10:05 pagi:
+Lo: *htop* -> CPU 100% lagi
+Lo: "..."
+
+Malamnya:
+Lo: "Gue butuh solusi yang scalable..."
+```
+
+Sound familiar?
+
+Lo bisa continue upgrade server sampe unlimited (dan habisin tabungan), atau lo bisa setup **load balancer**.
+
+Di artikel ini, gue bakal tunjukin cara setup Nginx sebagai load balancer | dari basic round-robin sampe production-ready config dengan health checks.
+
+## Apa Itu Load Balancer?
+
+Load balancer itu **traffic router** yang distribute incoming requests ke multiple servers.
+
+```
+Tanpa Load Balancer:
+                                    ┌─────────────┐
+User ────────────────────────────────│   Server    │
+Request ─────────────────────────────│   (1 unit) │
+                                    └─────────────┘
+Problem: Server bottleneck, single point of failure
+
+Dengan Load Balancer:
+                      ┌─────────────┐
+                      │ Load        │
+User ────────────────│ Balancer    │───┬──▶ Server 1
+Request ─────────────│ (Nginx)     │───┼──▶ Server 2
+                      │             │───┼──▶ Server 3
+                      └─────────────┘───└──▶ Server 4
+
+Benefit: Distributes load, redundancy, scalability
+```
+
+**Benefits:**
+- **Scalability** | Tambah server tanpa downtime
+- **High Availability** | Kalo satu server down, traffic ke-redirect
+- **Performance** | Load terdistribusi, response lebih cepat
+- **No Single Point of Failure** | Redundancy everywhere
+
+## Kenapa Nginx?
+
+```
+Load Balancer Options:
+
+| Tool | Pros | Cons |
+|------|------|------|
+| Nginx | Lightweight, easy config, production-proven | Basic Layer 7 only |
+| HAProxy | Advanced, TCP/HTTP, very fast | Complex config |
+| AWS ALB | Managed, auto-scaling, integrate AWS | Vendor lock-in, mahal |
+| Cloudflare | Global CDN, DDoS protection | Limited control |
+
+Nginx: Best balance antara simplicity dan capability untuk most use cases
+```
+
+Nginx itu:
+- **Lightweight** | Mulai dari 2MB, consume memory rendah
+- **Easy to configure** | Syntax yang straightforward
+- **Production-proven** | Dipake di Netflix, Airbnb, dan тысячи companies lain
+- **Flexible** | Support multiple load balancing algorithms
+
+## Setup Basic Load Balancer
+
+Oke, sekarang masuk ke praktiknya. Lo bakal setup Nginx sebagai load balancer.
+
+### Topologi
+
+```
+                    ┌──────────────────────────────────┐
+                    │         Internet                 │
+                    └──────────────┬───────────────────┘
+                                   │
+                    ┌──────────────▼───────────────────┐
+                    │        Nginx LB (1-2 units)      │
+                    │     Port 80, 443                  │
+                    └──────────────┬───────────────────┘
+                                   │
+               ┌───────────────────┼───────────────────┐
+               │                   │                   │
+     ┌─────────▼─────────┐ ┌───────▼───────┐ ┌────────▼────────┐
+     │   App Server 1    │ │  App Server 2  │ │  App Server 3   │
+     │   192.168.1.101   │ │  192.168.1.102│ │  192.168.1.103 │
+     │   Port 3000       │ │   Port 3000   │ │   Port 3000     │
+     └───────────────────┘ └───────────────┘ └─────────────────┘
+```
+
+### Step 1: Install Nginx
+
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install nginx
+
+# CentOS/RHEL
+sudo yum install epel-release
+sudo yum install nginx
+
+# macOS
+brew install nginx
+
+# Start dan enable
+sudo systemctl start nginx
+sudo systemctl enable nginx
+```
+
+### Step 2: Basic Load Balancer Config
+
+```nginx
+# /etc/nginx/nginx.conf atau /etc/nginx/conf.d/load-balancer.conf
+
+upstream app_backend {
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+
+server {
+    listen 80;
+    server_name myapp.com;
+
+    location / {
+        proxy_pass http://app_backend;
+        proxy_http_version 1.1;
+
+        # Proxy headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Test dan reload:
+
+```bash
+# Test config
+sudo nginx -t
+
+# Reload Nginx
+sudo systemctl reload nginx
+```
+
+**Verifikasi:**
+
+```bash
+# Cek Nginx status
+sudo systemctl status nginx
+
+# Cek listening ports
+sudo netstat -tlnp | grep nginx
+```
+
+## Load Balancing Algorithms
+
+Nginx support beberapa algoritma load balancing:
+
+### 1. Round Robin (Default)
+
+Request distribute secara равномерный ke semua servers.
+
+```nginx
+upstream app_backend {
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+```
+
+**Best for:** Server dengan specs yang sama
+
+### 2. Least Connections
+
+Request ke server yang punya active connections paling sedikit.
+
+```nginx
+upstream app_backend {
+    least_conn;
+
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+```
+
+**Best for:** Request dengan varying processing time
+
+### 3. IP Hash
+
+Request dari IP yang sama selalu ke server yang sama.
+
+```nginx
+upstream app_backend {
+    ip_hash;
+
+    server 192.168.1.101:3000;
+    server 192.168.1.103:3000;
+    # Jangan tambah/hapus server, akan break affinity
+
+    # Kalo server down, tambahin down server:
+    # server 192.168.1.102:3000 down;
+}
+```
+
+**Best for:** Session persistence (kalo nggak mau pake sticky sessions)
+
+### 4. Weighted Round Robin
+
+Server dengan specs lebih tinggi dapet lebih banyak traffic.
+
+```nginx
+upstream app_backend {
+    server 192.168.1.101:3000 weight=5;   # Dapet 50% traffic
+    server 192.168.1.102:3000 weight=3;   # Dapet 30% traffic
+    server 192.168.1.103:3000 weight=2;   # Dapet 20% traffic
+}
+```
+
+**Best for:** Server dengan specs berbeda
+
+## Health Checks
+
+Ini bagian yang super penting. Lo harus pastikan traffic nggak dikirim ke server yang down.
+
+### Passive Health Checks
+
+Nginx automatically skip server yang nggak respond atau return error:
+
+```nginx
+upstream app_backend {
+    server 192.168.1.101:3000 max_fails=3 fail_timeout=30s;
+    server 192.168.1.102:3000 max_fails=3 fail_timeout=30s;
+    server 192.168.1.103:3000 max_fails=3 fail_timeout=30s;
+
+    # Penjelasan:
+    # max_fails=3 | Setelah 3 failed attempts, server dianggap down
+    # fail_timeout=30s | Tunggu 30 detik sebelum coba lagi
+}
+```
+
+### Active Health Checks (Nginx Plus atau Open Source with Extension)
+
+Nginx Plus support active health checks (periodically test servers):
+
+```nginx
+# Nginx Plus only
+upstream app_backend {
+    zone backend 64k;
+
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+
+location / {
+    proxy_pass http://app_backend;
+    health_check;
+}
+```
+
+**Untuk open source Nginx**, lo bisa pake **nginx_upstream_check_module** atau kombinasi dengan **HAProxy** buat active checks.
+
+### Graceful Handling
+
+```nginx
+upstream app_backend {
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+
+    # Kalo SEMUA server down, return maintenance page
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name myapp.com;
+
+    location / {
+        proxy_pass http://app_backend;
+        proxy_connect_timeout 5s;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+
+    # Maintenance page
+    error_page 502 503 504 /maintenance.html;
+    location = /maintenance.html {
+        root /var/www/maintenance;
+    }
+}
+```
+
+## Advanced Configuration
+
+### SSL Termination
+
+Handle HTTPS di Nginx, forward HTTP ke backend:
+
+```nginx
+upstream app_backend {
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+
+server {
+    listen 80;
+    server_name myapp.com;
+
+    # Redirect HTTP ke HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name myapp.com;
+
+    # SSL Certificate
+    ssl_certificate /etc/nginx/ssl/myapp.com.crt;
+    ssl_certificate_key /etc/nginx/ssl/myapp.com.key;
+
+    # SSL Configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    location / {
+        proxy_pass http://app_backend;
+
+        # Proxy headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+```
+
+### Sticky Sessions (Session Affinity)
+
+Pastikan user yang sama selalu ke server yang sama:
+
+```nginx
+# Option 1: Cookie-based (Nginx Plus)
+upstream app_backend {
+    sticky cookie srv_id expires=1h domain=.myapp.com path=/;
+
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+
+# Option 2: Hash (Open Source)
+upstream app_backend {
+    hash $cookie_jsessionid consistent;
+
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+```
+
+### Rate Limiting
+
+Protect backend dari abuse:
+
+```nginx
+# Define rate limit zone
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+upstream app_backend {
+    server 192.168.1.101:3000;
+    server 192.168.1.102:3000;
+    server 192.168.1.103:3000;
+}
+
+server {
+    listen 80;
+    server_name api.myapp.com;
+
+    location /api/ {
+        proxy_pass http://app_backend;
+
+        # Apply rate limiting
+        limit_req zone=api_limit burst=20 nodelay;
+
+        # Custom error page
+        limit_req_status 429;
+    }
+
+    # Error page
+    error_page 429 = @rate_limit_exceeded;
+
+    location @rate_limit_exceeded {
+        return 429 '{"error": "Too many requests", "retry_after": 1}';
+        add_header Content-Type application/json;
+    }
+}
+```
+
+### Buffering
+
+Reduce backend load dengan buffering responses:
+
+```nginx
+server {
+    listen 80;
+    server_name myapp.com;
+
+    location / {
+        proxy_pass http://app_backend;
+
+        # Buffer configuration
+        proxy_buffering on;
+        proxy_buffer_size 4k;
+        proxy_buffers 8 4k;
+        proxy_busy_buffers_size 8k;
+
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+```
+
+## Production Configuration
+
+Ini complete production-ready config:
+
+```nginx
+# /etc/nginx/nginx.conf
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 4096;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    # Basic settings
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # Logging
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    'rt=$request_time uct=$upstream_connect_time uht=$upstream_header_time urt=$upstream_response_time';
+
+    access_log /var/log/nginx/access.log main;
+
+    # Performance
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript
+               application/xml application/xml+rss text/javascript application/x-javascript;
+
+    # Rate limiting zones
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_conn_zone $binary_remote_addr zone=addr:10m;
+
+    # Upstream backend
+    upstream app_backend {
+        zone backend 64k;
+
+        server 192.168.1.101:3000 weight=5 max_fails=3 fail_timeout=30s;
+        server 192.168.1.102:3000 weight=5 max_fails=3 fail_timeout=30s;
+        server 192.168.1.103:3000 weight=3 max_fails=3 fail_timeout=30s;
+
+        keepalive 32;
+    }
+
+    server {
+        listen 80;
+        server_name myapp.com www.myapp.com;
+
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "no-referrer-when-downgrade" always;
+
+        location / {
+            proxy_pass http://app_backend;
+
+            # Headers
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # Timeouts
+            proxy_connect_timeout 30s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+
+            # Buffering
+            proxy_buffering on;
+            proxy_buffer_size 4k;
+            proxy_buffers 8 4k;
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "OK\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Static files (kalau ada)
+        location /static/ {
+            alias /var/www/static/;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # Error pages
+        error_page 500 502 503 504 /50x.html;
+        location = /50x.html {
+            root /usr/share/nginx/html;
+        }
+    }
+
+    # HTTPS server (uncomment dan setup SSL)
+    # server {
+    #     listen 443 ssl http2;
+    #     server_name myapp.com www.myapp.com;
+    #
+    #     ssl_certificate /etc/nginx/ssl/myapp.com.crt;
+    #     ssl_certificate_key /etc/nginx/ssl/myapp.com.key;
+    #     ssl_session_cache shared:SSL:10m;
+    #     ssl_session_timeout 1d;
+    #
+    #     # Redirect ke HTTP version untuk compare
+    #     location / {
+    #         proxy_pass http://app_backend;
+    #         include proxy_params.conf;
+    #     }
+    # }
+}
+```
+
+## Monitoring Load Balancer
+
+Lo harus monitor load balancer buat tau performanya.
+
+### Basic Monitoring Commands
+
+```bash
+# Cek Nginx status
+sudo systemctl status nginx
+
+# Cek active connections
+sudo netstat -an | grep :80 | wc -l
+
+# Cek worker processes
+sudo nginx -V 2>&1 | grep worker_connections
+
+# Cek error log
+sudo tail -f /var/log/nginx/error.log
+
+# Cek access log stats
+sudo awk '{print $7}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head -20
+```
+
+### Monitoring with Status Module
+
+Enable stub status module:
+
+```nginx
+server {
+    listen 127.0.0.1:8080;
+
+    location /nginx_status {
+        stub_status on;
+        access_log off;
+        allow 127.0.0.1;
+        deny all;
+    }
+}
+```
+
+Akses status:
+
+```bash
+curl http://127.0.0.1:8080/nginx_status
+
+# Output:
+# Active connections: 291
+# server accepts handled requests
+#  16630948 16630948 31070465
+# Reading: 6 Writing: 179 Waiting: 106
+```
+
+**Penjelasan:**
+- `Active connections` | Jumlah koneksi aktif
+- `Reading` | Nginx lagi baca request header
+- `Writing` | Nginx lagi kirim response
+- `Waiting` | Koneksi idle, nunggu request (keep-alive)
+
+### Integration with Monitoring Tools
+
+```bash
+# Prometheus exporter (nginx-prometheus-exporter)
+docker run -p 9113:9113 \
+  -name nginx-exporter \
+  nginx/nginx-prometheus-exporter \
+  -nginx.scrape-uri=http://127.0.0.1:8080/nginx_status
+
+# Metrics endpoint
+curl http://localhost:9113/metrics
+```
+
+## High Availability Setup
+
+Satu Nginx LB itu single point of failure. Lo butuh minimal 2 load balancers.
+
+```
+                          ┌──────────────────────────────────┐
+                          │         Internet                  │
+                          └──────────────┬───────────────────┘
+                                         │
+                         ┌──────────────▼───────────────────┐
+                         │       Cloudflare / DNS LB         │
+                         │    (Failover based on health)     │
+                         └──────────────┬───────────────────┘
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    │                                       │
+          ┌─────────▼─────────┐                 ┌──────────▼──────────┐
+          │    Nginx LB #1    │                 │    Nginx LB #2     │
+          │  (Primary)        │                 │  (Standby)         │
+          │  192.168.1.10     │                 │  192.168.1.11      │
+          └─────────┬─────────┘                 └──────────┬──────────┘
+                    │                                       │
+                    └───────────────────┬───────────────────┘
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    │                                       │
+          ┌─────────▼─────────┐                 ┌──────────▼──────────┐
+          │   App Server 1    │                 │   App Server 2     │
+          └───────────────────┘                 └────────────────────┘
+```
+
+### VRRP dengan Keepalived
+
+Setup failover otomatis dengan Keepalived:
+
+```bash
+# Install keepalived
+sudo apt install keepalived
+```
+
+```bash
+# /etc/keepalived/keepalived.conf (Primary)
+global_defs {
+    router_id nginx_lb_1
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+
+    virtual_ipaddress {
+        192.168.1.200/24
+    }
+
+    track_script {
+        chk_nginx
+    }
+}
+
+script "/etc/keepalived/check_nginx.sh"
+```
+
+```bash
+# /etc/keepalived/check_nginx.sh
+#!/bin/bash
+if [ `ps -C nginx --no-headers | wc -l` -eq 0 ]; then
+    systemctl start nginx
+    sleep 2
+    if [ `ps -C nginx --no-headers | wc -l` -eq 0 ]; then
+        exit 1
+    fi
+fi
+exit 0
+```
+
+Virtual IP `192.168.1.200` akan always point ke Nginx LB yang alive.
+
+## Troubleshooting Common Issues
+
+### 1. 502 Bad Gateway
+
+```bash
+# Kemungkinan penyebab:
+# - Backend servers down
+# - Nginx nggak bisa connect ke backend
+# - Port salah
+
+# Cek:
+curl -v http://localhost:80
+
+# Test koneksi ke backend langsung:
+curl -v http://192.168.1.101:3000/health
+
+# Cek error log:
+sudo tail -20 /var/log/nginx/error.log
+```
+
+### 2. 504 Gateway Timeout
+
+```nginx
+# Increase timeout
+location / {
+    proxy_pass http://app_backend;
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}
+```
+
+### 3. High Load on LB
+
+```bash
+# Naikin worker connections
+worker_processes auto;
+worker_connections 8192;
+
+# Enable connection reuse
+upstream app_backend {
+    keepalive 64;
+}
+```
+
+### 4. SSL Handshake Failures
+
+```bash
+# Cek SSL certificate
+openssl s_client -connect myapp.com:443
+
+# Verify certificate chain
+openssl s_client -connect myapp.com:443 -showcerts
+```
+
+## Checklist Setup Load Balancer
+
+```
+Step 1: Install & Basic Config
+| □ Install Nginx
+| □ Buat upstream block
+| □ Setup basic proxy_pass
+| □ Test config dengan nginx -t
+| □ Reload Nginx
+
+Step 2: Load Balancing Algorithm
+| □ Pilih algorithm (round-robin, least_conn, ip_hash, weighted)
+| □ Konfigurasi sesuai kebutuhan
+| □ Test dengan multiple requests
+
+Step 3: Health Checks
+| □ Setup passive health checks
+| □ Konfigurasi max_fails dan fail_timeout
+| □ Buat maintenance page
+| □ Test failover (matikan satu backend)
+
+Step 4: Production Config
+| □ Setup SSL/TLS
+| □ Konfigurasi rate limiting
+| □ Setup logging
+| □ Tambah security headers
+| □ Enable compression
+
+Step 5: Monitoring
+| □ Enable status module
+| □ Setup access/error log rotation
+| □ Integrasi dengan monitoring tools
+
+Step 6: High Availability
+| □ Setup secondary load balancer
+| □ Configure Keepalived
+| □ Test failover scenario
+```
+
+## Kesimpulan
+
+Lo udah belajar gimana cara setup Nginx sebagai load balancer:
+
+**Basic Setup:**
+- Install Nginx dan configure upstream
+- Multiple load balancing algorithms
+- Passive health checks
+
+**Advanced Features:**
+- SSL termination
+- Sticky sessions
+- Rate limiting
+- Buffering
+- Production-ready config
+
+**High Availability:**
+- Multiple load balancers
+- Keepalived buat failover
+- Monitoring
+
+**Benefits yang lo dapet:**
+- Scalability | Tambah server kapan aja
+- High Availability | Zero downtime pas server down
+- Performance | Load terdistribusi
+- Security | Rate limiting, headers, SSL
+
+Load balancer itu investasi yang worth it. Nggak harus nunggu traffic tinggi baru setup. Makin awal makin bagus karena architecture udah tertata dari awal.
+
+Lo sekarang udah siap skalain aplikasi lu. Tambah server baru tinggal:
+1. Setup server baru
+2. Tambah ke upstream block
+3. Reload Nginx
+
+Tanpa downtime, tanpa user disruption.
+
+Kalo ada pertanyaan atau mau gue jelasin bagian tertentu lebih detail, comment aja bro.
+
+Stay scalable, stay available!

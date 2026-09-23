@@ -1,0 +1,308 @@
+---
+// Search Modal Component using Pagefind
+---
+
+<!-- Search Modal -->
+<div
+    id="search-modal"
+    class="fixed inset-0 z-[100] hidden"
+    aria-modal="true"
+    role="dialog"
+    aria-label="Search"
+>
+    <!-- Backdrop -->
+    <div
+        id="search-backdrop"
+        class="absolute inset-0 bg-black/50 backdrop-blur-sm opacity-0 transition-opacity duration-200"
+    ></div>
+
+    <!-- Modal Container -->
+    <div
+        class="relative flex items-start justify-center pt-[10vh] px-4"
+    >
+        <!-- Modal Content -->
+        <div
+            id="search-content"
+            class="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden opacity-0 scale-95 transition-all duration-200"
+        >
+            <!-- Search Input -->
+            <div class="flex items-center gap-3 px-4 py-4 border-b border-slate-200 dark:border-slate-700">
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="text-slate-400 dark:text-slate-500 flex-shrink-0"
+                >
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <path d="m21 21-4.34-4.34"></path>
+                </svg>
+                <input
+                    type="search"
+                    id="search-input"
+                    placeholder="Cari artikel atau tutorial..."
+                    class="flex-1 bg-transparent text-slate-900 dark:text-slate-100 placeholder-slate-400 outline-none text-lg"
+                    autocomplete="off"
+                />
+                <kbd class="hidden sm:inline-flex items-center gap-1 px-2 py-1 text-xs text-slate-400 bg-slate-100 dark:bg-slate-800 rounded border border-slate-200 dark:border-slate-700">
+                    ESC
+                </kbd>
+            </div>
+
+            <!-- Search Results -->
+            <div
+                id="search-results"
+                class="max-h-[60vh] overflow-y-auto"
+            >
+                <!-- Empty State -->
+                <div id="search-empty" class="py-12 text-center">
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="48"
+                        height="48"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        class="mx-auto mb-4 text-slate-300 dark:text-slate-600"
+                    >
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <path d="m21 21-4.34-4.34"></path>
+                    </svg>
+                    <p class="text-slate-500 dark:text-slate-400 text-sm">
+                        Ketik untuk mencari artikel atau tutorial
+                    </p>
+                </div>
+
+                <!-- Results Container (Pagefind will inject here) -->
+                <div id="search-results-container" class="hidden"></div>
+
+                <!-- Loading State -->
+                <div id="search-loading" class="hidden py-12 text-center">
+                    <div class="animate-spin w-8 h-8 border-2 border-sky-400 border-t-transparent rounded-full mx-auto"></div>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="flex items-center justify-between px-4 py-3 text-xs text-slate-400 dark:text-slate-500 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
+                <span>Powered by Pagefind</span>
+                <div class="flex items-center gap-4">
+                    <span class="hidden sm:inline-flex items-center gap-1">
+                        <kbd class="px-1.5 py-0.5 bg-white dark:bg-slate-700 rounded border border-slate-200 dark:border-slate-600">↑</kbd>
+                        <kbd class="px-1.5 py-0.5 bg-white dark:bg-slate-700 rounded border border-slate-200 dark:border-slate-600">↓</kbd>
+                        navigate
+                    </span>
+                    <span class="hidden sm:inline-flex items-center gap-1">
+                        <kbd class="px-1.5 py-0.5 bg-white dark:bg-slate-700 rounded border border-slate-200 dark:border-slate-600">Enter</kbd>
+                        select
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function initSearch() {
+        const modal = document.getElementById("search-modal");
+        const backdrop = document.getElementById("search-backdrop");
+        const content = document.getElementById("search-content");
+        const input = document.getElementById("search-input") as HTMLInputElement;
+        const resultsContainer = document.getElementById("search-results-container");
+        const emptyState = document.getElementById("search-empty");
+
+        if (!modal || !input) return;
+
+        let pagefind: any = null;
+        let isOpen = false;
+
+        // Load Pagefind on first open
+        async function loadPagefind() {
+            if (pagefind) return pagefind;
+            try {
+                // Use dynamic import with full URL to bypass Vite resolution
+                const base = window.location.origin;
+                const pagefindUrl = `${base}/pagefind/pagefind.js`;
+                pagefind = await import(/* @vite-ignore */ pagefindUrl);
+                await pagefind.init();
+                return pagefind;
+            } catch (e) {
+                // Pagefind not available (dev mode or not built yet)
+                return null;
+            }
+        }
+
+        // Open modal
+        function openModal() {
+            if (isOpen) return;
+            isOpen = true;
+            modal.classList.remove("hidden");
+            document.body.style.overflow = "hidden";
+
+            // Trigger animations
+            requestAnimationFrame(() => {
+                backdrop?.classList.remove("opacity-0");
+                content?.classList.remove("opacity-0", "scale-95");
+            });
+
+            // Load Pagefind and focus input
+            loadPagefind().then(() => {
+                input.focus();
+            });
+        }
+
+        // Close modal
+        function closeModal() {
+            if (!isOpen) return;
+            isOpen = false;
+
+            backdrop?.classList.add("opacity-0");
+            content?.classList.add("opacity-0", "scale-95");
+
+            setTimeout(() => {
+                modal.classList.add("hidden");
+                document.body.style.overflow = "";
+                input.value = "";
+                emptyState?.classList.remove("hidden");
+                resultsContainer?.classList.add("hidden");
+            }, 200);
+        }
+
+        // Search handler
+        async function handleSearch(query: string) {
+            if (!query.trim()) {
+                emptyState?.classList.remove("hidden");
+                resultsContainer?.classList.add("hidden");
+                return;
+            }
+
+            emptyState?.classList.add("hidden");
+
+            const pf = await loadPagefind();
+            if (!pf) {
+                // Show message when Pagefind is not available (dev mode)
+                resultsContainer!.innerHTML = `
+                    <div class="py-12 text-center">
+                        <p class="text-slate-500 dark:text-slate-400 text-sm">
+                            Search index belum tersedia.<br/>
+                            Jalankan <code class="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded text-xs">npm run build</code> terlebih dahulu.
+                        </p>
+                    </div>
+                `;
+                resultsContainer?.classList.remove("hidden");
+                return;
+            }
+
+            const results = await pf.search(query);
+
+            if (results.results.length === 0) {
+                resultsContainer!.innerHTML = `
+                    <div class="py-12 text-center">
+                        <p class="text-slate-500 dark:text-slate-400 text-sm">
+                            Tidak ada hasil untuk "${query}"
+                        </p>
+                    </div>
+                `;
+                resultsContainer?.classList.remove("hidden");
+                return;
+            }
+
+            // Get detailed results
+            const detailedResults = await Promise.all(
+                results.results.slice(0, 8).map((r: any) => r.data())
+            );
+
+            resultsContainer!.innerHTML = detailedResults
+                .map(
+                    (result: any) => `
+                <a
+                    href="${result.url}"
+                    class="block px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 last:border-0 transition-colors"
+                >
+                    <div class="flex items-start gap-3">
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            class="mt-0.5 text-slate-400 dark:text-slate-500 flex-shrink-0"
+                        >
+                            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <div class="flex-1 min-w-0">
+                            <h4 class="text-slate-900 dark:text-slate-100 font-medium text-sm truncate">
+                                ${result.meta?.title || "Untitled"}
+                            </h4>
+                            <p class="text-slate-500 dark:text-slate-400 text-xs mt-1 line-clamp-2">
+                                ${result.excerpt}
+                            </p>
+                            ${
+                                result.meta?.image
+                                    ? `<img src="${result.meta.image}" alt="" class="mt-2 w-full h-24 object-cover rounded-lg" loading="lazy" />`
+                                    : ""
+                            }
+                        </div>
+                    </div>
+                </a>
+            `
+                )
+                .join("");
+
+            resultsContainer?.classList.remove("hidden");
+        }
+
+        // Debounce search
+        let searchTimeout: ReturnType<typeof setTimeout>;
+        input.addEventListener("input", (e) => {
+            clearTimeout(searchTimeout);
+            const query = (e.target as HTMLInputElement).value;
+            searchTimeout = setTimeout(() => handleSearch(query), 150);
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener("keydown", (e) => {
+            // Open with Ctrl/Cmd + K
+            if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+                e.preventDefault();
+                openModal();
+            }
+
+            // Close with ESC
+            if (e.key === "Escape" && isOpen) {
+                closeModal();
+            }
+        });
+
+        // Close on backdrop click
+        backdrop?.addEventListener("click", closeModal);
+
+        // Close on outside click
+        content?.addEventListener("click", (e) => {
+            e.stopPropagation();
+        });
+
+        // Connect to existing search button in Header
+        const searchButton = document.getElementById("search-button");
+        searchButton?.addEventListener("click", openModal);
+    }
+
+    // Run on DOM ready
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initSearch);
+    } else {
+        initSearch();
+    }
+</script>

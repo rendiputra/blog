@@ -21,13 +21,13 @@ const seriesPosts = allTutorials
             <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">
                 Seri: {seriesName}
             </h4>
-            <ol class="space-y-1 text-sm">
+            <ol class="space-y-1 text-sm max-h-[35vh] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 dark:scrollbar-thumb-slate-700 scrollbar-track-transparent pr-1">
                 {seriesPosts.map((post, index) => {
                     const isCurrent = post.slug === currentSlug;
                     return (
                         <li>
                             <a
-                                href={`/blog/tutorial/${post.slug}`}
+                                href={`/tutorial/${post.slug}`}
                                 class:list={[
                                     "flex items-start gap-2 px-3 py-2 rounded-lg transition-colors",
                                     isCurrent

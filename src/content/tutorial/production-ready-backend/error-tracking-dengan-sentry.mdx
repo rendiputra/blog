@@ -1,0 +1,734 @@
+---
+title: "Nge-track Error di Production Pake Sentry: Say Goodbye to console.log()"
+description: "Tutorial setup Sentry di backend (Node.js dan Go) biar error di production ke-capture otomatis lengkap sama stack trace. Notifikasi via Telegram, Slack, atau email. Nggak perlu lagi SSH ke VPS cuma buat baca log."
+pubDate: 2026-09-08
+tags: ["sentry", "error-tracking", "nodejs", "golang", "devops", "monitoring", "production", "backend"]
+series: "Production-Ready Backend"
+order: 1
+coverImage: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200&h=630&fit=crop"
+---
+
+Bro, jujur aja.
+
+Lo pernah ngalamin ini nggak?
+
+```
+Scene: Jam 02:00 pagi, lo lagi enak-enaknya tidur
+
+Phone: *vibrates*
+User: "Bang, aplikasi lu error, nggak bisa checkout"
+
+Lo: *panik* "Error apa? Di fitur apa?"
+
+User: "Nggak tau, tiba-tiba muncul"
+
+Lo: *buka laptop, SSH ke VPS*
+Lo: *nano /var/log/app/error.log*
+Lo: *scroll scroll scroll*
+Lo: "Ooh, error di payment gateway..."
+
+Waktu yang kepake: 30 menit
+Tidur: rusak
+Mood: destroyed
+```
+
+Nah, skenario di atas itu **sangat avoidable**. Lo nggak harus jam 2 pagi ke VPS cuma buat baca log. Lo nggak harus nanya user "error-nya gimana?" karena user juga nggak tau.
+
+Solusinya? **Error tracking system** yang proper. Dan kali ini gue bakal tunjukin cara setup **Sentry** yang akan:
+
+- Capture semua error secara otomatis
+- Kasih full stack trace
+- Kasih konteks (user, request, environment)
+- Notify lo via Telegram, Slack, atau email
+- Semua dalam hitungan **5 menit** aja.
+
+## Kenapa Sentry?
+
+Oke, lo mungkin thinking | "Gue bisa aja pake console.log() atau bikin custom logger."
+
+Mari gue tunjukin kenapa itu nggak cukup:
+
+```
+console.log() Problems:
+| Nggak keliatan kalau lo nggak monitoring terminal
+| Ilang kalau server di-restart
+| Nggak ada context (user, request ID, environment)
+| Nggak ada stack trace yang proper
+| Nggak ada grouping (1000 same error = 1000 lines)
+| Nggak ada alerting
+
+Sentry Benefits:
+| Auto-capture semua unhandled exception
+| Full stack trace dengan source code context
+| User context (lo tau error ini dari user mana)
+| Request context (lo tau request apa yang trigger)
+| Error grouping (similar errors di-group)
+| Alerting (Telegram, Slack, Email)
+| Performance monitoring
+| Release tracking
+```
+
+## Prerequisites
+
+Sebelum mulai, lo butuh:
+
+1. **Akun Sentry** | Daftar gratis di [sentry.io](https://sentry.io). Free tier-nya udah cukup buat development dan side projects.
+2. **Backend app** | Node.js atau Go. Gue bakal cover kedua-duanya.
+3. **10 menit** | Itu aja. Serius.
+
+## Setup Sentry Account
+
+### Step 1: Buat Project Baru
+
+1. Buka [sentry.io](https://sentry.io) dan login (atau daftar kalau belum punya)
+2. Klik **Create Project**
+3. Pilih platform | **Node.js** atau **Go**
+4. Beri nama project | contoh: `my-api-production`
+5. Set alert frequency | **I'll create it later** atau **Immediately** terserah lu
+
+```
+Project created!
+| Organization: Your Organization
+| Project: my-api-production
+| DSN: https://abc123@o123456.ingest.sentry.io/7890123
+| Client Key (DSN): https://abc123@o123456.ingest.sentry.io/7890123
+```
+
+**PENTING**: Copy DSN-nya. Lo bakal butuh ini di config nanti.
+
+### Step 2: Install SDK
+
+```bash
+# Node.js
+npm install @sentry/node
+
+# Atau kalau pake TypeScript
+npm install @sentry/node @sentry/types
+```
+
+## Node.js: Setup Sentry
+
+Oke, sekarang masuk ke kode. Gue assume lo pake Express.js, tapi konsepnya sama buat framework lain.
+
+### Basic Setup
+
+```javascript
+// sentry.js | Sentry configuration
+const Sentry = require('@sentry/node');
+
+// Initialize Sentry
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+
+  // Environment
+  environment: process.env.NODE_ENV || 'development',
+
+  // Release tracking (auto-detect dari git)
+  release: process.env.npm_package_version,
+
+  // Sample rate | 1.0 = capture semua, 0.1 = 10%
+  tracesSampleRate: 1.0,
+
+  // Enable debug mode di development
+  debug: process.env.NODE_ENV === 'development',
+
+  // Add request context secara otomatis
+  integrations: [
+    new Sentry.Integrations.Http({ tracing: true }),
+    new Sentry.Integrations.Express({ app: require('express') }),
+    new Sentry.Integrations.Mongo(),
+    new Sentry.Integrations.Postgres(),
+  ],
+});
+
+module.exports = Sentry;
+```
+
+### Integrate dengan Express
+
+```javascript
+// app.js | Express app dengan Sentry
+const express = require('express');
+const Sentry = require('./sentry');
+const myApp = require('./routes');
+
+const app = express();
+
+// Sentry request handler | taruh di TOP of middleware stack
+app.use(Sentry.Handlers.requestHandler());
+
+// Health check (biasanya sebelum Sentry capture)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Lo mau exclude health check dari error tracking?
+// app.get('/health', Sentry.Handlers.ignoreFunction, (req, res) => { ... });
+
+// Body parser
+app.use(express.json());
+
+// Routes
+app.use('/', myApp);
+
+// Sentry error handler | taruh di BOTTOM of middleware stack
+app.use(Sentry.Handlers.errorHandler());
+
+// Custom error handler (optional)
+app.use((err, req, res, next) => {
+  // Lo masih mau capture error di Sentry
+  // atau handle custom logic
+
+  // Log manual kalau perlu
+  console.error('Custom error:', err);
+
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal Server Error',
+    // Jangan kasih stack trace di production response!
+  });
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+```
+
+### Capture Error Secara Manual
+
+Kadang lo nggak throw error | lo cuma mau log sesuatu ke Sentry:
+
+```javascript
+// Contoh: Validation error yang bukan fatal
+app.post('/checkout', async (req, res) => {
+  try {
+    const { userId, items } = req.body;
+
+    if (!items || items.length === 0) {
+      // Lo mau catat ini sebagai warning, bukan error
+      Sentry.captureMessage('Checkout attempt with empty cart', {
+        level: 'warning',
+        tags: { feature: 'checkout' },
+        extra: { userId },
+      });
+
+      return res.status(400).json({ error: 'Cart is empty' });
+    }
+
+    // Continue normal flow...
+    const result = await processCheckout(userId, items);
+    res.json(result);
+
+  } catch (error) {
+    // Error yang actual fatal
+    Sentry.captureException(error, {
+      extra: {
+        userId: req.body.userId,
+        items: req.body.items,
+      },
+    });
+
+    res.status(500).json({ error: 'Checkout failed' });
+  }
+});
+```
+
+### Tambahkan User Context
+
+Ini yang penting | biar lo tau error ini dari user mana:
+
+```javascript
+// Middleware untuk set user context
+app.use((req, res, next) => {
+  if (req.user) {
+    // Set user context ketika ada authenticated user
+    Sentry.setUser({
+      id: req.user.id,
+      email: req.user.email,
+      username: req.user.username,
+    });
+  }
+
+  // Add custom context
+  Sentry.setTag('api_version', req.headers['x-api-version']);
+
+  next();
+});
+```
+
+Sekarang setiap error yang ke-capture bakal include info:
+- User ID dan email
+- Request ID
+- API version
+- Full stack trace
+
+## Go: Setup Sentry
+
+Sekarang untuk Go developer. Setup-nya sedikit beda karena Go use context.
+
+### Install SDK
+
+```bash
+go get github.com/getsentry/sentry-go
+```
+
+### Basic Setup
+
+```go
+// sentry.go
+package main
+
+import (
+    "log"
+    "os"
+
+    "github.com/getsentry/sentry-go"
+)
+
+func InitSentry() {
+    err := sentry.Init(sentry.ClientOptions{
+        Dsn: os.Getenv("SENTRY_DSN"),
+
+        // Environment
+        Environment: os.Getenv("GO_ENV"),
+
+        // Release (from git)
+        Release: getGitCommit(),
+
+        // Sample rate | 1.0 = capture semua
+        TracesSampleRate: 1.0,
+
+        // Enable debug kalau di development
+        Debug: os.Getenv("GO_ENV") == "development",
+
+        // Attach stack trace
+        AttachStacktrace: true,
+
+        // Server name untuk identifikasi
+        ServerName: os.Hostname(),
+    })
+
+    if err != nil {
+        log.Fatalf("Sentry initialization failed: %v", err)
+    }
+}
+
+func getGitCommit() string {
+    // Bisa ambil dari git rev-parse HEAD
+    // Atau dari environment variable yang di-set di CI/CD
+    return os.Getenv("GIT_COMMIT")
+}
+```
+
+### Setup dengan Gin Framework
+
+```go
+// main.go
+package main
+
+import (
+    "fmt"
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+    "github.com/getsentry/sentry-go"
+)
+
+func main() {
+    InitSentry()
+
+    // Setup Gin
+    r := gin.Default()
+
+    // Sentry middleware
+    r.Use(sentryMiddleware())
+
+    // Routes
+    r.GET("/health", healthCheck)
+    r.POST("/checkout", checkout)
+
+    r.Run(":8080")
+}
+
+func sentryMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        // Inject Sentry context ke request
+        sentry.WithScope(func(scope *sentry.Scope) {
+            scope.SetRequest(c.Request)
+
+            // Set user kalau ada
+            if userID, exists := c.Get("user_id"); exists {
+                scope.SetUser(sentry.User{
+                    ID: fmt.Sprintf("%v", userID),
+                })
+            }
+
+            c.Set("sentry_scope", scope)
+        })
+
+        c.Next()
+    }
+}
+
+func healthCheck(c *gin.Context) {
+    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func checkout(c *gin.Context) {
+    var req CheckoutRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    // Process checkout
+    result, err := processCheckout(req)
+    if err != nil {
+        // Capture error
+        if scope, exists := c.Get("sentry_scope"); exists {
+            scope.(*sentry.Scope).CaptureException(err)
+        } else {
+            sentry.CaptureException(err)
+        }
+
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "checkout failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, result)
+}
+```
+
+### Manual Error Capture
+
+```go
+// Capture error dengan context
+func someFunction() {
+    defer sentry.Recover()
+
+    result, err := riskyOperation()
+    if err != nil {
+        sentry.WithScope(func(scope *sentry.Scope) {
+            scope.SetLevel(sentry.LevelError)
+            scope.SetTag("operation", "risky_operation")
+            scope.SetExtra("retry_count", 3)
+            scope.CaptureException(err)
+        })
+    }
+}
+```
+
+## Setup Alert Rules
+
+Ini bagian yang seru | gimana caranya dapet notifikasi pas error terjadi.
+
+### Alert Rule Basics
+
+1. Buka Sentry dashboard
+2. Pilih project lu
+3. Klik **Alerts** di sidebar
+4. Klik **Create Alert Rule**
+
+```
+Alert Rule Configuration:
+| Name: "API 5xx Errors"
+| Metric: Error
+| Filter: event.level:error AND http.status_code:5*
+| Threshold: > 0 in 5 minutes
+| Action: Notify Team
+```
+
+### Setup Telegram Notification
+
+Sentry support Slack dan Email out-of-the-box, tapi untuk Telegram lo butuh sedikit config.
+
+**Option 1: Pake Slack sebagai bridge**
+
+```
+Slack -> Telegram Bridge:
+| 1. Buat Slack channel
+| 2. Install Slack app ke Telegram
+| 3. Setup Sentry -> Slack notification
+| 4. Slack app forward ke Telegram
+```
+
+**Option 2: Custom webhook**
+
+Lo bisa bikin custom webhook yang ke-trigger pas alert:
+
+```javascript
+// webhook-handler.js | Cloudflare Worker atau Express endpoint
+app.post('/webhooks/sentry', async (req, res) => {
+  const { alert_name, error_level, error_message, error_url } = req.body;
+
+  // Kirim ke Telegram
+  const telegramMessage = `
+🚨 *Sentry Alert*
+
+*Alert:* ${alert_name}
+*Level:* ${error_level}
+*Message:* ${error_message}
+*URL:* ${error_url}
+
+Time: ${new Date().toISOString()}
+  `.trim();
+
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: telegramMessage,
+      parse_mode: 'Markdown',
+    }),
+  });
+
+  res.json({ ok: true });
+});
+```
+
+Di Sentry, setup webhook:
+1. Settings | Projects | Your Project | Webhooks
+2. Add webhook | URL: `https://your-worker.workers.dev/webhooks/sentry`
+3. Select events: `Error`
+
+### Setup Slack Notification
+
+1. Di Sentry dashboard | Settings | Integrations
+2. Klik **Slack**
+3. Follow authorization flow
+4. Connect ke workspace lu
+
+```
+Slack Alert Configuration:
+| Channel: #alerts-production
+| Alert Name: "5xx Errors"
+| Conditions:
+|   - event.type: error
+|   - count() > 5 in 5 minutes
+|   - environment: production
+| Actions:
+|   - Slack notification
+|   - Issue assignment
+```
+
+### Setup Email Alert
+
+```
+Email Alert Configuration:
+| To: dev-team@yourcompany.com
+| Subject: "[Sentry] {{ alert_name }} in {{ project }}"
+| Conditions:
+|   - event.level: error
+|   - environment: production
+|   - user.is_authenticated: false
+| Frequency: Immediate
+```
+
+## Advanced: Custom Event Properties
+
+Lo bisa tambahin metadata tambahan biar error lebih gampang di-diagnose:
+
+```javascript
+// Node.js | Add custom properties
+Sentry.configureScope((scope) => {
+  // Custom tags
+  scope.setTag('payment_provider', 'stripe');
+
+  // Custom breadcrumb (action trail sebelum error)
+  scope.addBreadcrumb({
+    category: 'auth',
+    message: 'User login attempt',
+    level: 'info',
+    data: { method: 'password' },
+  });
+
+  // Extra context
+  scope.setExtra('database_query', 'SELECT * FROM orders');
+});
+```
+
+```go
+// Go | Custom properties
+sentry.WithScope(func(scope *sentry.Scope) {
+    scope.SetTag("payment_provider", "stripe")
+    scope.SetExtra("database_query", "SELECT * FROM orders")
+
+    scope.CaptureException(err)
+})
+```
+
+## Best Practices
+
+### 1. Jangan Capture Sensitive Data
+
+```javascript
+// ❌ Bad: Kebocoran data sensitif
+Sentry.configureScope((scope) => {
+  scope.setExtra('password', req.body.password); // NO!
+  scope.setExtra('credit_card', req.body.cardNumber); // DEFINITELY NO!
+});
+
+// ✅ Good: Sensor data sensitif
+Sentry.configureScope((scope) => {
+  scope.setExtra('request_body', {
+    email: req.body.email,
+    // Password di-sensor otomatis oleh SDK
+  });
+});
+```
+
+Lo bisa set `sendDefaultPii: false` di config buat auto-censor.
+
+### 2. Sample Error Rates
+
+Lo nggak mau Sentry overwhelms pas traffic tinggi:
+
+```javascript
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+
+  // Kalau traffic tinggi, sample 10% error aja
+  tracesSampleRate: 0.1,
+  profilesSampleRate: 0.1,
+
+  // Untuk high-volume endpoints
+  sampleRate: 0.1, // Capture 10% sampled errors
+});
+```
+
+### 3. Environment-Specific Config
+
+```javascript
+// sentry.js
+const Sentry = require('@sentry/node');
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+
+  // Only capture source maps dan full context di production
+  attachStacktrace: process.env.NODE_ENV === 'production',
+
+  // Debug mode cuma di development
+  debug: process.env.NODE_ENV === 'development',
+
+  // Lower sample rate di production
+  tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
+});
+```
+
+### 4. Release Tracking
+
+Setup release tracking biar lo tau error ini muncul setelah deploy mana:
+
+```bash
+# Di CI/CD pipeline (GitHub Actions example)
+- name: Deploy
+  run: |
+    # Deploy code
+    ./deploy.sh
+
+    # Tell Sentry which release
+    npx sentry-cli releases new $GITHUB_SHA
+    npx sentry-cli releases files $GITHUB_SHA
+    npx sentry-cli releases deploys $GITHUB_SHA new --env production
+```
+
+## Testing the Setup
+
+Sekarang lo harus test apakah Sentry working dengan bener:
+
+### Test Manual Error
+
+```javascript
+// Tambahkan route sementara untuk test
+app.get('/test-error', (req, res) => {
+  // Trigger manual error
+  throw new Error('Test error from Sentry setup');
+});
+
+// Atau async error
+app.get('/test-async-error', async (req, res) => {
+  await someAsyncFunctionThatFails();
+});
+```
+
+Visit `/test-error` di browser, terus check Sentry dashboard.
+
+Lo harusnya liat:
+- Error dengan full stack trace
+- User context (kalau logged in)
+- Request context
+- Environment info
+
+### Test Alert
+
+Di Sentry dashboard, lo bisa trigger test alert:
+
+1. Alerts | Your Alert Rule
+2. Actions | **Send Test Notification**
+
+Lo harusnya dapet pesan di Slack/Telegram/Email.
+
+## Kapan Sentry Mulai Berguna?
+
+```
+Early Stage (0-100 users):
+| console.log() mungkin masih cukup
+| Tapi setup Sentry dari awal = habit yang bagus
+| Cost: FREE
+
+Growing Stage (100-10k users):
+| Sentry mulai very valuable
+| Errors yang rare mulai muncul
+| User reports jadi lebih spesifik
+| Cost: Free tier cukup
+
+Scale Stage (10k+ users):
+| Sentry MANDATORY
+| Can't debug production without it
+| Performance monitoring critical
+| Cost: $26/month ke atas
+
+Enterprise:
+| Full Sentry plan
+| Custom integrations
+| Audit logs
+| Cost: Negotiated
+```
+
+## Kesimpulan
+
+Lo udah selesai setup Sentry. Dan sekarang:
+
+**Yang lo punya:**
+- Error tracking otomatis dengan full stack trace
+- User context di setiap error
+- Request context (URL, method, headers)
+- Alert via Slack, Telegram, atau email
+- Release tracking (error muncul setelah deploy mana)
+- Performance monitoring
+
+**Yang lo nggak perlu lagi:**
+- SSH ke VPS cuma buat baca log
+- Nanya user "error-nya gimana?"
+- Scroll 1000 lines di error log
+- Manual search di log files
+- Jam 2 pagi interruptions yang nggak jelas konteksnya
+
+**Next steps:**
+1. Deploy code dengan Sentry integration
+2. Test error capture dengan visit `/test-error`
+3. Verify alert notification kerja
+4. Setup Slack/Telegram channel buat alerts
+5. Review dan filter noise alerts
+
+Sekarang giliran lu. Setup Sentry di project lu, dan tinggal comment di bawah kalo ada masalah. Barangkali lo nemu error yang interesting untuk di-share.
+
+Stay error-free, bro!
+
+---
+
+*Next di series "Production-Ready Backend": Cara setup proper logging dengan structured logs (ELK Stack atau Loki). Stay tuned!*

@@ -1,0 +1,599 @@
+---
+title: "Part 1: Kenapa Lo Butuh Replication? Konsep Master-Slave Database"
+description: "Lo tau nggak apa yang terjadi kalo database production lo tiba-tiba mati? Semua user nggak bisa akses data. Dalam series ini, gue bakal jelasin gimana Master-Slave replication bikin database lu lebih resilient dan performant."
+pubDate: 2026-08-22
+tags: ["database", "replication", "postgresql", "mysql", "high-availability", "master-slave", "backend", "devops"]
+series: "Jangan Sampai Database Lu Down"
+order: 1
+coverImage: "https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1200&h=630&fit=crop"
+---
+
+Oke, skenario yang bikin cold sweat.
+
+Jam 2 malam, lo lagi enak-enaknya tidur.
+
+Lo tiba-tiba bangun karena notifikasi:
+
+```
+[ALERT] Database connection timeout!
+[ALERT] Database server unreachable!
+[ALERT] Website is DOWN!
+```
+
+Lo langsung buka laptop, SSH ke server. Lo cek:
+
+```bash
+ssh admin@database-server.com
+
+# Lo cek status database
+systemctl status postgresql
+
+# Output:
+# postgresql.service - PostgreSQL Database Server
+#    Loaded: loaded (/lib/systemd/system/postgresql.service; enabled)
+#    Active: failed (Result: signal) since Mon 15 Jan 02:00:00 UTC 2024
+#    Main PID: 1234 (code=killed, status=9/KILL)
+
+# OOM killer killed the database server!
+# Out of memory!
+```
+
+Database server ke-`kill` sama OS karena kehabisan RAM. Server mati. Semua user nggak bisa akses aplikasi. Lo harus:
+
+1. SSH ke server
+2. Restart database
+3. Wait for recovery
+4. Verify data integrity
+5. Pray nggak ada data corruption
+
+**Downtime: 15-30 menit. Revenue loss. User complain.**
+
+Sound familiar?
+
+Di series ini, gue bakal tunjukin gimana **Master-Slave replication** bisa bikin database lu lebih resilient. Kalo Master down, Slave langsung takeover. Downtime = seconds, bukan minutes.
+
+Let's go!
+
+## Kenapa Database Bisa Down?
+
+Oke, pertama lo harus paham kenapa database bisa fail.
+
+### Common Causes
+
+```
+Database Failure Causes:
+| 1. Hardware failure | Disk failure, RAM error, CPU overheating
+| 2. OOM (Out of Memory) | Too many connections, memory leak
+| 3. Network partition | Server unreachable
+| 4. Human error | Accidental DELETE, wrong configuration
+| 5. Load spike | Too many queries overwhelm the server
+| 6. Disk full | No space for writes
+| 7. Corrupted data | Hardware issue atau bug
+```
+
+### Impact Without Replication
+
+```
+Single Database Setup:
+| User Request → Application → Database Server
+|                              ↓
+|                              [DOWN]
+|                              ↓
+|                         Website Error
+|                              ↓
+|                       User Frustrated
+|                              ↓
+|                       Revenue Loss
+
+Downtime impact:
+| 1 minute downtime | $5,000 - $50,000 (depends on company size)
+| 1 hour downtime | $100,000+ for large e-commerce
+| Data loss | PR disaster
+```
+
+## Apa Itu Database Replication?
+
+Replication itu **menyalin data dari satu database ke database lain secara otomatis**.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Database Replication                        │
+│                                                              │
+│   ┌──────────────────┐                                    │
+│   │    MASTER DB    │                                    │
+│   │   (Primary)     │                                    │
+│   │                  │──Replicate──▶┌──────────────────┐ │
+│   │  Writes happen  │              │    SLAVE DB     │ │
+│   │  here           │              │   (Replica)     │ │
+│   │                  │              │                  │ │
+│   │                  │              │  Reads happen    │ │
+│   │                  │              │  here            │ │
+│   └──────────────────┘              └──────────────────┘ │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Concepts
+
+```
+Replication Components:
+| 1. Master | Primary database, handles writes
+| 2. Slave/Standby | Secondary database, copies data from Master
+| 3. Replication | Process of copying data
+| 4. WAL (Write-Ahead Log) | Transaction logs that get shipped
+| 5. Lag | Time difference between Master and Slave
+```
+
+## Jenis-Jenis Replication
+
+### 1. Master-Slave (Async)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Async Master-Slave                          │
+│                                                              │
+│   Application                                                │
+│       │                                                       │
+│       ├──Write──▶ Master (committed)                        │
+│       │                 │                                     │
+│       │                 │ WAL shipped async                    │
+│       │                 │ (usually 0.1-1 second lag)        │
+│       │                 ▼                                     │
+│       │            Slave (copied)                            │
+│       │                                                       │
+│       └─Read──▶ Slave                                        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics:**
+- Write ke Master
+- Read dari Slave
+- Ada lag kecil (biasanya < 1 detik)
+- Simple setup
+- Good untuk: read-heavy workloads
+
+### 2. Master-Slave (Sync)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Sync Master-Slave                           │
+│                                                              │
+│   Application                                                │
+│       │                                                       │
+│       ├──Write──▶ Master                                     │
+│       │                 │                                     │
+│       │                 │ Write + confirm                      │
+│       │                 │ slave acknowledged                  │
+│       │                 ▼                                     │
+│       │            Slave (confirmed)                          │
+│       │                                                       │
+│       └─Read──▶ Slave                                        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics:**
+- Write nggak complete sampe Slave confirm
+- Zero lag (theoretically)
+- More strict consistency
+- Slower writes
+- Good untuk: financial transactions
+
+### 3. Multi-Slave
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Multi-Slave Setup                           │
+│                                                              │
+│   ┌──────────────────┐                                    │
+│   │    MASTER DB    │                                    │
+│   └────────┬─────────┘                                    │
+│            │                                                 │
+│     ┌──────┴──────┐                                        │
+│     │             │                                         │
+│ ┌───▼───┐    ┌───▼───┐                                   │
+│ │ Slave │    │ Slave │                                   │
+│ │   1  │    │   2   │                                   │
+│ │(Read)│    │(Read)│                                   │
+│ └───────┘    └───────┘                                   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics:**
+- Load distribution untuk reads
+- More read capacity
+- Slave 1 atau 2 bisa down, aplikasi tetep jalan
+- Good untuk: high read traffic
+
+### 4. Master-Master (Multi-Master)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Master-Master                               │
+│                                                              │
+│   ┌──────────────────┐    ┌──────────────────┐          │
+│   │    MASTER 1     │◀──▶│    MASTER 2     │          │
+│   │  (Write/Read A) │    │  (Write/Read B)  │          │
+│   └──────────────────┘    └──────────────────┘          │
+│                                                              │
+│   Bi-directional replication                                │
+│   More complex | conflict resolution needed                │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics:**
+- Both servers accept writes
+- Conflict resolution needed
+- Complex to manage
+- Good untuk: geo-distributed databases
+
+## Bagaimana Replication Bekerja?
+
+Di PostgreSQL dan MySQL, replication work melalui **WAL (Write-Ahead Log)**.
+
+### Step-by-Step Process
+
+```
+Step 1: Write Happens on Master
+| User: UPDATE users SET name = 'Andi' WHERE id = 1;
+|
+| Master writes to WAL (Write-Ahead Log) first
+| WAL entry: UPDATE users SET name = 'Andi' WHERE id = 1;
+
+Step 2: WAL Entry Shipped to Slave
+| Master sends WAL entry to Slave
+| (via streaming replication)
+
+Step 3: Slave Applies WAL Entry
+| Slave reads WAL entry
+| Slave applies same change
+| Slave: UPDATE users SET name = 'Andi' WHERE id = 1;
+
+Step 4: Data Consistent
+| Both databases now have same data
+```
+
+### Streaming Replication
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Streaming Replication                        │
+│                                                              │
+│   Master                                                     │
+│   ┌─────────────────────────────────────────────┐          │
+│   │ WAL (Write-Ahead Log)                       │          │
+│   │ [entry1][entry2][entry3][entry4]...       │          │
+│   └──────────┬────────────────────────────┬───┘          │
+│              │                             │                │
+│              │ Stream to Slave            │                │
+│              │ (real-time, continuous)     │                │
+│              ▼                             ▼                │
+│   ┌─────────────────────────────────────────────┐          │
+│   │ Slave                                    │          │
+│   │ ┌─────────────────────────────────────┐  │          │
+│   │ │ WAL Receiver                         │  │          │
+│   │ │ Receives and applies WAL entries   │  │          │
+│   │ └─────────────────────────────────────┘  │          │
+│   └─────────────────────────────────────────────┘          │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Benefits dari Replication
+
+### 1. High Availability
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Failover Scenario                             │
+│                                                              │
+│   Normal State:                                              │
+│   ┌──────────────┐                                          │
+│   │   Master    │ ← Application writes here                │
+│   └──────┬───────┘                                          │
+│          │ replication                                        │
+│   ┌──────▼───────┐                                          │
+│   │   Slave     │ ← Application reads here                   │
+│   └──────────────┘                                          │
+│                                                              │
+│   Master Down:                                               │
+│   ┌──────────────┐                                          │
+│   │   MASTER    │ ✗ DEAD                                   │
+│   │   (DOWN)    │                                          │
+│   └──────────────┘                                          │
+│          │                                                   │
+│          │ Promote Slave                                      │
+│          ▼                                                   │
+│   ┌──────────────┐                                          │
+│   │   SLAVE     │ ← Now becomes new Master                  │
+│   │  (PROMOTED) │                                          │
+│   └──────────────┘                                          │
+│          │                                                   │
+│          │ Application redirects writes here                  │
+│          ▼                                                   │
+│   Application continues running                               │
+│   Downtime: ~30-60 seconds (or less with auto-failover)    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2. Read Scaling
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Read Distribution                            │
+│                                                              │
+│   Without Replication:                                        │
+│   ┌──────────────┐                                          │
+│   │   Master    │                                          │
+│   │              │ ← All reads bottleneck here               │
+│   │  10,000 RPS │                                          │
+│   └──────────────┘                                          │
+│                                                              │
+│   With Replication (3 Slaves):                               │
+│   ┌──────────────┐                                          │
+│   │   Master    │                                          │
+│   │  (writes)   │                                          │
+│   └──────────────┘                                          │
+│          │                                                   │
+│   ┌──────┴───────┐ ┌──────┐ ┌──────┐                     │
+│   │    Slave 1   │ │ Slave│ │ Slave│                     │
+│   │  3,333 RPS  │ │  3,333│ │  3,334│                     │
+│   └──────────────┘ └──────┘ └──────┘                     │
+│                                                              │
+│   Total: 10,000 RPS spread across 3 servers                 │
+│   Per-server load: 3x reduction                             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. Backup tanpa Downtime
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Backup Scenario                               │
+│                                                              │
+│   Without Replication:                                        │
+│   ┌──────────────┐                                          │
+│   │   Master    │ ← Backup causes table locks!               │
+│   │  BACKING UP │ ← User queries slow atau timeout            │
+│   └──────────────┘                                          │
+│                                                              │
+│   With Replication:                                           │
+│   ┌──────────────┐                                          │
+│   │   Master    │                                          │
+│   └──────────────┘                                          │
+│          │ replication                                        │
+│   ┌─────▼───────┐                                           │
+│   │   Slave     │ ← Backup dari Slave!                        │
+│   │  BACKING UP │ ← Master nggak affected                    │
+│   └─────────────┘                                           │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 4. Geographic Distribution
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Geographic Distribution                        │
+│                                                              │
+│   ┌──────────────┐                                          │
+│   │ Singapore    │  ← Primary (low latency)                  │
+│   │   Master     │                                          │
+│   └──────────────┘                                          │
+│          │                                                   │
+│   ┌──────┴───────┐                                         │
+│   │             │                                           │
+│ ┌─▼─────┐   ┌───▼─────┐                                   │
+│ │ Tokyo │   │ Jakarta │                                   │
+│ │ Slave │   │  Slave  │                                   │
+│ └───────┘   └─────────┘                                   │
+│                                                              │
+│ User di Asia baca dari server terdekat                        │
+│ Low latency for all users                                    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Trade-offs dan Considerations
+
+### Lag
+
+```
+Replication Lag:
+| Master: UPDATE users SET name = 'Andi'
+|
+| (0.5 seconds later)
+|
+| Slave: (still shows old name until WAL applied)
+```
+
+**Impact:**
+- User writes data, immediately reads | might get old data
+- Not suitable untuk: financial transactions (where consistency critical)
+- Solution: Read from Master for critical reads
+
+### Complexity
+
+```
+Without Replication:
+| Setup: 1 server
+| Monitoring: 1 server
+| Backup: 1 server
+| Maintenance: 1 server
+
+With Replication:
+| Setup: 2 servers + monitoring
+| Monitoring: 2 servers + lag monitoring
+| Backup: 1 server ( Slave)
+| Maintenance: Coordinate updates
+| Failover: Need procedure/p automation
+```
+
+### Cost
+
+```
+Hardware/Cloud Costs:
+| Without Replication: 1 server
+| With Replication: 2 servers minimum
+
+Cloud providers offer:
+| RDS PostgreSQL replica: +$X/month per replica
+| Azure Database: +$Y/month per replica
+| Self-hosted: +1 server cost
+```
+
+## Kapan Butuh Replication?
+
+### Tanda-Tanda Lo Butuh Replication
+
+```
+Signs you need replication:
+| 1. Read queries > 80% of total queries
+| 2. Single point of failure unacceptable
+| 3. Database backup takes too long
+| 4. User complaints tentang slow queries
+| 5. SLA requires 99.9%+ uptime
+| 6. Multi-region/user base
+```
+
+### Kapan Nggak Perlu Replication
+
+```
+Probably don't need replication:
+| 1. Development/staging environment
+| 2. Small app dengan < 1000 daily users
+| 3. Simple CRUD app dengan low traffic
+| 4. Budget constraints
+| 5. Data is non-critical
+```
+
+## Common Replication Architectures
+
+### 1. Single Master, Single Slave
+
+```
+┌──────────────────┐
+│      Master      │
+│  (Read + Write)  │
+└────────┬─────────┘
+         │ replication
+         ▼
+┌──────────────────┐
+│      Slave       │
+│    (Read Only)   │
+└─────────────────┘
+```
+
+**Use case:** Simple HA, backup offloading
+
+### 2. Single Master, Multiple Slaves
+
+```
+┌──────────────────┐
+│      Master      │
+│  (Read + Write)  │
+└────────┬─────────┘
+         │ replication
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐ ┌───────┐
+│ Slave │ │ Slave │
+│   1   │ │   2   │
+└───────┘ └───────┘
+```
+
+**Use case:** Read scaling, HA
+
+### 3. Cascading Replication
+
+```
+┌──────────────────┐
+│      Master      │
+└────────┬─────────┘
+         │ replication
+         ▼
+┌──────────────────┐
+│   Relay Server   │
+└────────┬─────────┘
+         │ replication
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐ ┌───────┐
+│ Slave │ │ Slave │
+│   1   │ │   2   │
+└───────┘ └───────┘
+```
+
+**Use case:** Large number of slaves, reduce master load
+
+## Series Overview
+
+Di series ini, gue bakal guide lo dari concept sampe implementation:
+
+```
+Part 1 (Sekarang): Concepts ✓
+| - Why databases fail
+| - Replication types
+| - How replication works
+| - Benefits
+| - Trade-offs
+
+Part 2: Hands-on Setup
+| - Setup PostgreSQL replication
+| - Setup MySQL replication
+| - Configure streaming replication
+| - Test replication
+
+Part 3: Application Integration
+| - Read/write splitting with ORMs
+| - Connection pooling
+| - Failover handling
+| - Monitoring replication lag
+```
+
+## Kesimpulan
+
+Lo udah belajar kenapa database replication itu penting:
+
+**Key Takeaways:**
+
+```
+Replication solves:
+| 1. High Availability | Automatic failover
+| 2. Read Scaling | Distribute read load
+| 3. Backup | Backup tanpa downtime
+| 4. Geographic Distribution | Low latency everywhere
+
+Types:
+| - Async Master-Slave | Fast writes, small lag
+| - Sync Master-Slave | Consistent, slower writes
+| - Multi-Slave | Scale reads
+| - Master-Master | Bi-directional (complex)
+```
+
+**When to use:**
+- High availability needed
+- Read-heavy workloads
+- SLA requires 99.9%+ uptime
+- Multi-region deployment
+
+**Trade-offs:**
+- Lag (async replication)
+- Complexity
+- Cost (extra servers)
+- Need proper monitoring
+
+Di Part 2, gue bakal tunjukin hands-on setup replication di PostgreSQL dan MySQL. Lo bakal setup 2 VPS dengan Master-Slave configuration.
+
+See you di Part 2!
+
+---
+
+*Next: [Part 2] Hands-on Setup Replication di PostgreSQL/MySQL*

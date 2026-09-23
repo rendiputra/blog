@@ -1,0 +1,508 @@
+---
+title: "VPS vs Serverless: Mana yang Paling Cocok Buat Side Project Lu?"
+description: "Bingung milih antara VPS dan Serverless buat side project? gue breakdown plus minus keduanya, plus panduan aman soal free tier yang available sekarang. No BS!"
+pubDate: 2026-04-28
+tags: ["vps", "serverless", "cloud", "hosting", "side-project", "cloudflare", "aws", "devops"]
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Bro, ini pertanyaan yang sering banget muncul di kepala developer Indonesia:
+
+> "Gue harus pilih VPS atau Serverless buat side project gue?"
+
+Jujur? **Depends.** Nggak ada yang universally "the best". Yang ada adalah yang "the best for YOUR specific use case".
+
+Di artikel ini gue bakal breakdown semua yang perlu lu pertimbangin, termasuk soal free tier yang aman dipake. Jadi lu bisa decision dengan confidence, bukan asal pilih yang viral di Twitter.
+
+## Apa Itu VPS?
+
+VPS itu Virtual Private Server. Intinya, lu sewa sebagian resource dari satu physical server yang udah dipecah jadi banyak virtual machine.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Physical Server                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │    VPS #1    │  │    VPS #2    │  │    VPS #3    │  │
+│  │   (Lu)       │  │   (Orang     │  │   (Orang     │  │
+│  │  2GB RAM     │  │   lain)      │  │   lain)      │  │
+│  │  1 CPU       │  │  2GB RAM     │  │  2GB RAM     │  │
+│  │  50GB SSD    │  │  1 CPU       │  │  1 CPU       │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+Lu dapet:
+- Dedicated resource (RAM, CPU, Storage)
+- Full control (root access, bisa install apa aja)
+- Fixed monthly cost (biasanya $5-$20 untuk basic)
+
+### Provider VPS yang Populer
+
+| Provider | Starting Price | RAM | CPU | Storage |
+|----------|---------------|-----|-----|---------|
+| DigitalOcean | $4/bulan | 1GB | 1 core | 25GB SSD |
+| Vultr | $2.50/bulan | 512MB | 1 core | 10GB SSD |
+| Linode | $5/bulan | 1GB | 1 core | 25GB SSD |
+| AWS EC2 | $3.78/bulan | 1GB | 1 core | 8GB SSD |
+| Oracle Cloud | GRATIS | 1GB | 1 core | 50GB SSD |
+
+Iya bro, **Oracle Cloud free forever** masih ada. Lu bisa dapetin 1 VPS permanent dengan specs yang cukup buat belajar dan side project. More on this later.
+
+## Apa Itu Serverless?
+
+Serverless bukan berarti "tanpa server". Yang bener, lu nggak perlu manage server-nya sama sekali. Lu upload code, dan cloud provider yang handle semua.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Cloud Provider                        │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │  Serverless Platform (AWS Lambda, CF Workers, dll) │ │
+│  │                                                      │ │
+│  │  Lu upload function:                                 │ │
+│  │                                                      │ │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │ │
+│  │  │ Function │  │ Function │  │ Function │         │ │
+│  │  │    A     │  │    B     │  │    C     │         │ │
+│  │  └──────────┘  └──────────┘  └──────────┘         │ │
+│  │                                                      │ │
+│  │  Auto-scale, pay-per-use, no server management       │ │
+│  └────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+Lu bayar berdasarkan:
+- **Request count** | berapa kali function dipanggil
+- **Execution time** | berapa lama function jalan
+- **Memory usage** | berapa RAM yang dipake
+
+### Provider Serverless yang Populer
+
+| Provider | Free Tier (Monthly) | Pay-as-you-go |
+|----------|---------------------|---------------|
+| Cloudflare Workers | 100,000 requests | $0.50 per 100k |
+| AWS Lambda | 1M requests, 400,000 GB-s | mulai $0.20 per 1M |
+| Vercel | Unlimited (hobby) | mulai $20/bulan |
+| Netlify Functions | 125,000 requests | $0.40 per 100k |
+| Firebase Functions | 125,000 invocations | $0.40 per 1M |
+
+## Perbandingan Langsung: VPS vs Serverless
+
+| Aspek | VPS | Serverless |
+|-------|-----|------------|
+| **Setup complexity** | Medium (lu setup sendiri) | Low (upload code, done) |
+| **Scaling** | Manual (upgrade plan) | Auto (infinite, theoretically) |
+| **Cost model** | Fixed monthly | Pay-per-use |
+| **Cold start** | Nggak ada | Ada (biasanya 100ms-2s) |
+| **Idle cost** | Bayar terus | Nggak bayar kalau nggak dipake |
+| **Full control** | Ya (root access) | Terbatas (constrained runtime) |
+| **Database** | Install di VPS sendiri | Managed database service |
+| **Persistent storage** | Easy (disk lokal) | Need external service |
+| **Long-running tasks** | Oke | Limited (Lambda max 15 min) |
+| **Best for** | Traditional apps | APIs, automation, event-driven |
+
+## Kapan Harus Pilih VPS?
+
+### 1. Lu butuh full control
+
+```bash
+# Lu bisa install whatever lu mau
+sudo apt install nginx
+sudo apt install postgresql
+sudo apt install redis-server
+sudo apt install docker
+
+# Lu bisa config systemd services
+sudo systemctl enable my-app
+sudo systemctl start my-app
+```
+
+Nggak ada batasan. VPS itu kayak komputer kosong yang lu kelola sendiri.
+
+### 2. Side project lu traditional web app
+
+Contoh traditional apps yang cocok di VPS:
+- Laravel/PHP app
+- Rails/ Ruby app
+- Node.js app yang jalan terus (websocket, game server)
+- Database server sendiri (PostgreSQL, MySQL)
+
+### 3. Lu mau predictable cost
+
+```yaml
+# VPS cost: fixed $6/bulan
+# Tidak peduli lu punya 10 request atau 10 juta request
+# Cost tetap $6
+```
+
+Ini bagus buat budgeting, apalagi kalo lu baru mulai dan belum tau traffic-nya bakal kayak gimana.
+
+### 4. Lu butuh persistent state
+
+Serverless itu stateless by design. Lu butuh external storage buat state. VPS? Lu bisa simpan semuanya di disk.
+
+```javascript
+// VPS: bisa write langsung ke disk
+const fs = require('fs');
+fs.writeFileSync('/var/data/cache.json', JSON.stringify(data));
+
+// Serverless: harus pake external storage (S3, R2, dll)
+// Lebih complex, lebih mahal
+```
+
+## Kapan Harus Pilih Serverless?
+
+### 1. Traffic unpredictable atau mostly idle
+
+```yaml
+# Side project lu: mungkin 0 visitor/hr, kadang 1000/hr
+# VPS: tetap bayar $6/bulan
+# Serverless: mungkin $0 bulan ini
+```
+
+Kalo side project lu jarang dipake, serverless lebih ekonomis.
+
+### 2. Lu mau move fast, no ops headache
+
+```bash
+# Serverless: git push, done
+git init
+git add .
+git commit -m "deploy"
+git push origin main
+
+# 30 detik kemudian, app lu live
+```
+
+Nggak perlu setup nginx, configure systemd, setup CI/CD pipeline yang complex. Cloud provider handle semua.
+
+### 3. Lu mau auto-scale tanpa config
+
+Serverless auto-scale dari 0 sampe infinity tanpa lu ngapa-ngapain. VPS? Kalo traffic naik, lu harus upgrade plan, migrate, dll.
+
+### 4. API yang event-driven
+
+```javascript
+// Cloudflare Worker: jalan pas ada request
+export default {
+  async fetch(request) {
+    return new Response('Hello World');
+  }
+};
+
+// Otomatis handle 1 request atau 1 juta request
+// Nggak ada config scaling
+```
+
+Perfect buat:
+- Webhook handlers
+- API endpoints
+- Background job processors
+- Transformation/parsing services
+
+## Free Tier: Aman Nggak Sih Dipake?
+
+Nah, ini bagian yang sering disalahpahami orang. **Free tier itu ada limitasinya**, dan penting banget buat ngerti sebelum lu rely on it.
+
+### Cloudflare Workers Free Tier
+
+```
+Free Tier Limits:
+| 100,000 requests per day
+| 10ms CPU time per request (unbound plan: 50ms)
+| 128MB memory
+| No dedicated bandwidth (bandwidth联盟included)
+```
+
+**✅ aman dipake buat:**
+- Side project personal
+- Portfolio sites
+- API prototype
+- Learning dan eksperimen
+
+**❌ batas yang perlu dipertimbangin:**
+- 100k requests/hari = 3 juta requests/bulan. Cukup buat side project kecil-sedang.
+- 10ms CPU time | ini ketat. Heavy computation bakal timeout.
+- Nggak ada persistent storage built-in | lu perlu R2/Workers KV kalau mau simpan data.
+
+### AWS Free Tier
+
+```
+Free Forever (Always Free):
+| Lambda: 1M requests + 400,000 GB-s per bulan
+| S3: 5GB storage, 20,000 GET requests
+| DynamoDB: 25GB storage, 25 WCU/RCU
+| CloudFront: 1TB egress, 10M requests
+| RDS: 750 hours db.t2.micro per bulan
+
+12 Month Free:
+| EC2: 750 hours t2.micro per bulan (1 tahun)
+| RDS: 750 hours (1 tahun)
+```
+
+**✅ aman dipake buat:**
+- Production-ready apps (kalo lu optimize dengan bener)
+- Long-term projects
+- Learning purposes
+
+**❌ batas yang perlu dipertimbangin:**
+- EC2 free tier itu **12 bulan doang**. Setelah itu, lu kena charge.
+- Banyak services yang "12 months free" artinya 1 tahun aja.
+- Always Free (Lambda, S3) emang permanent, tapi ada limit.
+
+### Oracle Cloud Free Tier
+
+Ini yang sering dilupain orang. Oracle masih ngasih:
+
+```
+Always Free Resources:
+| 2 Autonomous Databases (APEX, SQL Dev)
+| 2 Block Storage volumes (100GB total)
+| 1 Load Balancer
+| 4 VMs (AMD) | HARUS DIPAKAI
+| 10TB outbound bandwidth/month
+```
+
+**✅ aman dipake buat:**
+- VPS replacement (4 VMs AMD!)
+- Database server
+- Production apps yang lightweight
+
+**❌ batas yang perlu dipertimbangin:**
+- VMs harus kepake atau Oracle bakal shutdown. Lu harus maintain usage >1% per bulan.
+- Dokumentasi Oracle agak ribet dibanding provider lain.
+- Support sometimes... let's just say "not great".
+
+### Vercel/Netlify Hobby
+
+```
+Vercel Hobby:
+| Unlimited projects
+| 100GB bandwidth
+| 100 serverless function executions
+| Custom domain dengan SSL
+
+Netlify Free:
+| 100GB bandwidth
+| 300 build minutes
+| Forms: 100 submissions
+```
+
+**✅ aman dipake buat:**
+- Frontend apps (Next.js, Astro, React)
+- Static sites
+- JAMstack apps
+
+**❌ batas yang perlu dipertimbangin:**
+- Serverless function executions ada limit.
+- Build minutes limited (kalo pake CI/CD auto-deploy).
+- Custom domain oke, tapi email routing? Perlu upgrade.
+
+## Studi Kasus: Pilih Hosting Berdasarkan Project Type
+
+Gue kasih guideline berdasarkan jenis side project:
+
+### 1. Blog Pribadi / Portfolio (Static)
+
+```
+Recommended: Vercel / Netlify / Cloudflare Pages
+Why:
+| Free, unlimited bandwidth
+| Auto-deploy from Git
+| SSL, CDN, custom domain all free
+| Speed: edge network globally
+```
+
+```bash
+# Deploy ke Vercel (example)
+npm i -g vercel
+vercel
+
+# Atau connect GitHub repo, auto-deploy on push
+```
+
+### 2. Laravel / PHP Web App
+
+```
+Recommended: VPS (DigitalOcean/Vultr) atau Oracle Cloud Free
+Why:
+| PHP natively runs di VPS
+| Database (MySQL/PostgreSQL) di VM yang sama
+| Full control over nginx/apache config
+| Predictable cost
+```
+
+### 3. Next.js / Node.js Full-stack
+
+```
+Recommended: Vercel (frontend) + managed database
+Why:
+| Vercel handles Next.js SSR/SSG natively
+| Tambahin PlanetScale / Supabase / Neon (free tiers)
+| Serverless functions buat API routes
+| Easy scaling kalau viral
+```
+
+### 4. API Backend Saja
+
+```
+Recommended: Cloudflare Workers atau AWS Lambda
+Why:
+| Pay-per-request (kadang $0)
+| Auto-scale
+| Global edge network
+| Perfect buat REST/GraphQL API
+```
+
+```javascript
+// Cloudflare Worker contoh
+export default {
+  async fetch(request) {
+    const { pathname } = new URL(request.url);
+
+    if (pathname === '/api/users') {
+      const users = await getUsers();
+      return Response.json(users);
+    }
+
+    return new Response('Not Found', { status: 404 });
+  }
+};
+```
+
+### 5. Real-time App (Chat, Game, WebSocket)
+
+```
+Recommended: VPS (mandatory)
+Why:
+| WebSocket butuh persistent connection
+| Serverless functions itu stateless (connect/disconnect)
+| Bisa pake Socket.io, ws, atau native WebSocket
+```
+
+### 6. Data Processing / Heavy Computation
+
+```
+Recommended: VPS atau AWS Lambda (dengan memory tinggi)
+Why:
+| Lambda max 15 menit execution time
+| Heavy computation butuh sustained CPU
+| Consider: batch processing, queue-based approach
+```
+
+## Warning: Jangan Lakukan Ini
+
+### 1. Jangan rely ke free tier buat production app yang critical
+
+```
+❌ Bad: Startup lu depend ke "free tier AWS forever"
+Reality: Limit bisa berubah, billing bisa error,
+         dan tiba-tiba lu kena charge $500
+
+✅ Good: Treat free tier sebagai "starter pack"
+         Plan migration path dari day 1
+```
+
+### 2. Jangan ignore cost monitoring
+
+```bash
+# Setup billing alert di AWS
+aws budgets create-budget \
+  --account-id 123456789012 \
+  --budget '{ "BudgetName": "Monthly Cap", ... }'
+
+# Setup alert di Cloudflare
+# Dashboard > Billing > Billing Alerts
+```
+
+Lu harus tau KAPAN lu bakal mulai kena charge. Jangan sampe tagihan datang dan shock lu.
+
+### 3. Jangan skip security hardening di VPS
+
+```bash
+# ❌ Jangan bikin VPS langsung jalanin app lu
+# Tanpa ini, dalam 5 menit udah ada bot coba brute force
+
+# ✅ Wajib harden:
+# 1. Disable root login
+sudo sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+
+# 2. Setup firewall
+sudo ufw allow 22
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw enable
+
+# 3. Install fail2ban
+sudo apt install fail2ban
+sudo systemctl enable fail2ban
+
+# 4. Setup automatic updates
+sudo apt install unattended-upgrades
+sudo dpkg-reconfigure unattended-upgrades
+```
+
+### 4. Jangan expect serverless = always free
+
+```
+Miskonsepsi umum:
+"Serverless kan pay-per-use, jadi gratis terus dong!"
+
+Realita:
+| Cloudflare Worker free: 100k req/hari
+| Kalo lu dapet 500k req/hari? Bayar.
+| Kalo lu jalanin 1M req/hari? Bayar lebih.
+```
+
+## My Recommendation Hierarchy
+
+Berdasarkan pengalaman gue:
+
+```
+1. Static sites / Frontend apps
+   | Vercel > Netlify > Cloudflare Pages > GitHub Pages
+
+2. Full-stack JS (Next.js, dll)
+   | Vercel > Railway > Render
+
+3. PHP / Laravel / Traditional web
+   | Oracle Cloud Free > VPS $5/bulan > AWS EC2
+
+4. API / Serverless functions
+   | Cloudflare Workers > Vercel > AWS Lambda
+
+5. Apps yang butuh persistent connection
+   | VPS mandatory
+
+6. Database
+   | PostgreSQL: Supabase > Neon > PlanetScale > Self-hosted
+   | MySQL: PlanetScale > Self-hosted
+   | Vector: Pinecone (free tier) > Weaviate
+```
+
+## Kesimpulan
+
+**VPS vs Serverless** itu bukan pertanyaan "which is better", tapi "which is better for YOUR project".
+
+**Pilih VPS kalo:**
+- Lu butuh full control
+- Project lu traditional web app
+- Traffic lu predictable
+- Lu nyaman dengan ops work
+
+**Pilih Serverless kalo:**
+- Lu mau move fast
+- Traffic lu unpredictable atau mostly idle
+- Project lu stateless (API, automation)
+- Lu mau auto-scale tanpa config
+
+** Soal free tier:**
+- **Cloudflare Workers** | terbaik buat serverless, 100k req/hari itu cukup Royal buat side project
+- **Oracle Cloud** | terbaik buat VPS replacement, 4 VMs free forever
+- **Vercel/Netlify** | terbaik buat frontend dan JAMstack
+- **AWS** | powerful tapi complex, free tier ada batas waktu
+
+Yang paling penting | understand limits dari free tier yang lu pake. Treat it sebagai starting point, bukan permanent solution.
+
+Lu sekarang deploy side project lu pake apa? Share di comment! Barangkali ada tips yang gue lewatin.
+
+Stay smart dengan cloud!

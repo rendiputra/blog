@@ -1,0 +1,809 @@
+---
+title: "Part 3: Bikin Worker | Biar API Lu Cepet, Worker yang Kerja Keras"
+description: "Tutorial bikin BullMQ worker yang actual process jobs dari queue. Dari email sending sampe PDF generation, semua jalan di background. API lu tetep secepat kilat tanpa harus nunggu proses berat selesai."
+pubDate: 2026-08-15
+tags: ["tutorial", "message-broker", "backend", "nodejs", "background-jobs", "redis", "bullmq", "worker"]
+series: "Nyelamatin API dari Timeout"
+order: 3
+coverImage: "https://images.unsplash.com/photo-1504868584819-f8e8b4b6d7e3?w=1200&h=630&fit=crop"
+---
+
+Oke, lo udah punya:
+- Redis connection
+- Queue system
+- API yang add jobs
+
+Tapi ada yang missing | **Worker** yang actual process jobs.
+
+Worker itu proses terpisah yang "listen" ke queue dan process setiap job yang masuk. Lo bisa jalanin multiple workers buat handle load.
+
+Di part ini, gue bakal bikin worker yang real untuk:
+- Email sending
+- PDF generation
+- Job event listeners
+- Error handling
+- Logging
+
+## Apa Itu Worker?
+
+Worker itu process yang独立的 dari API server:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    API Server (Port 3000)                    │
+│                                                              │
+│  app.post('/register', async (req, res) => {                │
+│    // Validate, create user                                  │
+│    await addEmailJob({ to: email, otp }); // 50ms only     │
+│    res.json({ success: true }); // Fast response!          │
+│  });                                                         │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  Job: email-otp │
+                    │  Status: queued │
+                    └─────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Worker Process (Port ?)                    │
+│                                                              │
+│  worker.process('email-send', async (job) => {              │
+│    // Actual email sending (3 detik)                        │
+│    await sendEmail(job.data);                               │
+│    // Done! User dapet email di background                  │
+│  });                                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Flow lengkap:**
+1. User hit `/register`
+2. API add job ke queue (50ms)
+3. API response ke user (100ms total)
+4. Worker pick up job dari queue
+5. Worker process email (3 detik)
+6. User dapet email tanpa harus nunggu
+
+## Setup Worker
+
+### Step 1: Create Worker File
+
+```typescript
+// workers/email.worker.ts
+import { Worker, Job } from 'bullmq';
+import Redis from 'ioredis';
+import { EmailJobData } from '../types/email';
+
+// Redis connection (sama kayak queue)
+const connection = new Redis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,
+});
+
+// Create worker
+const emailWorker = new Worker(
+  'email-send', // Queue name (harus sama kayak queue lu)
+  async (job: Job<EmailJobData>) => {
+    // Process job
+    console.log(`Processing email job: ${job.id}`);
+    console.log(`Template: ${job.data.template}`);
+    console.log(`To: ${job.data.to}`);
+
+    // Send email based on template
+    switch (job.data.template) {
+      case 'otp':
+        return await sendOTPEmail(job.data);
+      case 'welcome':
+        return await sendWelcomeEmail(job.data);
+      case 'password-reset':
+        return await sendPasswordResetEmail(job.data);
+      default:
+        throw new Error(`Unknown template: ${job.data.template}`);
+    }
+  },
+  {
+    connection,
+    concurrency: 5, // Process 5 jobs concurrently
+  }
+);
+
+// Worker event listeners
+emailWorker.on('completed', (job) => {
+  console.log(`Job ${job.id} completed successfully`);
+});
+
+emailWorker.on('failed', (job, err) => {
+  console.error(`Job ${job?.id} failed:`, err.message);
+});
+
+emailWorker.on('error', (err) => {
+  console.error('Worker error:', err);
+});
+
+console.log('Email worker started!');
+```
+
+### Step 2: Implement Email Sending Functions
+
+```typescript
+// lib/email/sender.ts
+import nodemailer from 'nodemailer';
+import { EmailJobData } from '../../types/email';
+
+// Setup transporter (sesuaikan dengan email provider lu)
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+
+export async function sendOTPEmail(data: EmailJobData) {
+  const { to, data: templateData } = data;
+  const { name, otp } = templateData;
+
+  const html = `
+    <h1>Verify Your Email</h1>
+    <p>Hi ${name},</p>
+    <p>Your verification code is:</p>
+    <h2 style="font-size: 32px; letter-spacing: 8px;">${otp}</h2>
+    <p>This code expires in 10 minutes.</p>
+    <p>If you didn't request this, please ignore this email.</p>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM,
+    to,
+    subject: 'Verify your email',
+    html,
+  });
+
+  console.log(`OTP email sent to ${to}`);
+
+  return { sent: true, to, template: 'otp' };
+}
+
+export async function sendWelcomeEmail(data: EmailJobData) {
+  const { to, data: templateData } = data;
+  const { name } = templateData;
+
+  const html = `
+    <h1>Welcome to Our App!</h1>
+    <p>Hi ${name},</p>
+    <p>Thank you for joining us. We're excited to have you!</p>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM,
+    to,
+    subject: 'Welcome to Our App!',
+    html,
+  });
+
+  return { sent: true, to, template: 'welcome' };
+}
+
+export async function sendPasswordResetEmail(data: EmailJobData) {
+  const { to, data: templateData } = data;
+  const { resetLink } = templateData;
+
+  const html = `
+    <h1>Password Reset</h1>
+    <p>Click the link below to reset your password:</p>
+    <a href="${resetLink}">Reset Password</a>
+    <p>This link expires in 1 hour.</p>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM,
+    to,
+    subject: 'Reset Your Password',
+    html,
+  });
+
+  return { sent: true, to, template: 'password-reset' };
+}
+```
+
+### Step 3: Run Worker
+
+Lo bisa run worker sebagai:
+- **Process terpisah** (recommended untuk production)
+- **Part dari app yang sama** (oke untuk development)
+
+```typescript
+// workers/email.worker.ts | Updated with imports
+import { Worker, Job } from 'bullmq';
+import Redis from 'ioredis';
+import { EmailJobData } from '../types/email';
+import { sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail } from '../lib/email/sender';
+
+const connection = new Redis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,
+});
+
+const emailWorker = new Worker(
+  'email-send',
+  async (job: Job<EmailJobData>) => {
+    console.log(`Processing: ${job.id} | Template: ${job.data.template}`);
+
+    switch (job.data.template) {
+      case 'otp':
+        return await sendOTPEmail(job.data);
+      case 'welcome':
+        return await sendWelcomeEmail(job.data);
+      case 'password-reset':
+        return await sendPasswordResetEmail(job.data);
+      default:
+        throw new Error(`Unknown template: ${job.data.template}`);
+    }
+  },
+  {
+    connection,
+    concurrency: 5,
+  }
+);
+
+emailWorker.on('completed', (job) => {
+  console.log(`Job ${job.id} completed`);
+});
+
+emailWorker.on('failed', (job, err) => {
+  console.error(`Job ${job?.id} failed: ${err.message}`);
+});
+
+console.log('Email worker started');
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down worker...');
+  await emailWorker.close();
+  process.exit(0);
+});
+```
+
+## Run Worker
+
+### Development Mode
+
+```bash
+# Run worker di terminal terpisah
+npx ts-node workers/email.worker.ts
+
+# Atau pake nodemon buat auto-reload
+npx nodemon --exec ts-node workers/email.worker.ts
+```
+
+### Production Mode
+
+Gue rekomendasiin pake **PM2** buat production:
+
+```bash
+# Install PM2
+npm install -g pm2
+
+# Start worker dengan PM2
+pm2 start workers/email.worker.ts \
+  --name "email-worker" \
+  --exp-backoff-restart-delay=100 \
+  --max-restarts=10
+
+# Commands berguna
+pm2 list              # Liat semua processes
+pm2 logs email-worker # Liat logs
+pm2 restart email-worker
+pm2 delete email-worker
+```
+
+### Docker Mode
+
+```dockerfile
+# workers/Dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+COPY . .
+
+# Run worker only, not API
+CMD ["node", "workers/email.worker.ts"]
+```
+
+```yaml
+# docker-compose.yml
+services:
+  # ... existing services ...
+
+  email-worker:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+    restart: unless-stopped
+    depends_on:
+      - redis
+```
+
+## Multiple Workers
+
+Lo bisa jalanin multiple workers buat handle load:
+
+```typescript
+// workers/index.ts
+// Start semua workers
+
+import { emailWorker } from './email.worker';
+import { pdfWorker } from './pdf.worker';
+import { exportWorker } from './export.worker';
+
+console.log('All workers started!');
+
+// Handle shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down workers...');
+  await Promise.all([
+    emailWorker.close(),
+    pdfWorker.close(),
+    exportWorker.close(),
+  ]);
+  process.exit(0);
+});
+```
+
+## PDF Generation Worker
+
+Sekarang gue bikin worker yang lebih complex | PDF generation.
+
+```typescript
+// workers/pdf.worker.ts
+import { Worker, Job } from 'bullmq';
+import Redis from 'ioredis';
+import PDFDocument from 'pdfkit';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { PDFJobData } from '../lib/queue/pdf.queue';
+import { Report } from '../models/report';
+
+const connection = new Redis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,
+});
+
+// S3 client (bisa pake R2 juga)
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+});
+
+const pdfWorker = new Worker(
+  'pdf-generation',
+  async (job: Job<PDFJobData>) => {
+    const { userId, reportType, dateRange, format } = job.data;
+
+    console.log(`Generating ${reportType} report for user ${userId}`);
+
+    // Update job progress
+    await job.updateProgress(10);
+
+    // Fetch data dari database
+    const reportData = await fetchReportData(userId, reportType, dateRange);
+    await job.updateProgress(30);
+
+    // Generate PDF
+    const pdfBuffer = await generatePDF(reportData, reportType);
+    await job.updateProgress(70);
+
+    // Upload ke S3/R2
+    const key = `reports/${userId}/${Date.now()}-${reportType}.pdf`;
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.S3_BUCKET!,
+      Key: key,
+      Body: pdfBuffer,
+      ContentType: 'application/pdf',
+    }));
+
+    // Generate signed URL (expires dalam 1 jam)
+    const downloadUrl = await s3.send(new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET!,
+      Key: key,
+    }));
+
+    const signedUrl = await getSignedUrl(s3, downloadUrl, { expiresIn: 3600 });
+
+    await job.updateProgress(100);
+
+    // Save to database
+    const report = await Report.create({
+      userId,
+      type: reportType,
+      fileUrl: signedUrl,
+      generatedAt: new Date(),
+    });
+
+    return {
+      success: true,
+      reportId: report.id,
+      downloadUrl: signedUrl,
+    };
+  },
+  {
+    connection,
+    concurrency: 2, // PDF generation berat, lower concurrency
+  }
+);
+
+async function fetchReportData(userId: string, type: string, dateRange: any) {
+  // Fetch dari database
+  // Implement sesuai kebutuhan
+  return {
+    userId,
+    type,
+    dateRange,
+    // Data yang mau di-include di PDF
+  };
+}
+
+async function generatePDF(data: any, type: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument();
+    const chunks: Buffer[] = [];
+
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    // Header
+    doc.fontSize(20).text(`${type.toUpperCase()} Report`, { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text(`Generated: ${new Date().toISOString()}`);
+    doc.moveDown();
+
+    // Content (sesuaikan dengan type)
+    doc.fontSize(14).text('Summary', { underline: true });
+    doc.fontSize(10).text(`Report Type: ${data.type}`);
+    doc.text(`Date Range: ${data.dateRange.start} - ${data.dateRange.end}`);
+    doc.moveDown();
+
+    // Footer
+    doc.moveDown(20);
+    doc.fontSize(8).text('Generated by App', { align: 'center' });
+
+    doc.end();
+  });
+}
+
+pdfWorker.on('completed', (job, result) => {
+  console.log(`PDF Job ${job.id} completed:`, result);
+});
+
+pdfWorker.on('failed', async (job, err) => {
+  console.error(`PDF Job ${job?.id} failed:`, err.message);
+
+  // Notify user kalo failed
+  if (job?.data.userId) {
+    // bisa add job ke notification queue
+    // await addNotificationJob({ type: 'report-failed', userId: job.data.userId });
+  }
+});
+
+console.log('PDF worker started');
+```
+
+## Job Progress Tracking
+
+Lo bisa track progress dari job dengan `job.updateProgress()`:
+
+```typescript
+// Di worker
+await job.updateProgress(0);   // Start
+await job.updateProgress(25);  // Quarter done
+await job.updateProgress(50);  // Half done
+await job.updateProgress(75);  // Almost done
+await job.updateProgress(100); // Complete
+
+// Di API buat check status
+app.get('/job/:id', async (req, res) => {
+  const job = await emailQueue.getJob(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  res.json({
+    id: job.id,
+    status: job.status,
+    progress: job.progress || 0,
+    result: job.returnvalue,
+    failedReason: job.failedReason,
+    attemptsMade: job.attemptsMade,
+    createdAt: job.timestamp,
+    processedOn: job.processedOn,
+    finishedOn: job.finishedOn,
+  });
+});
+```
+
+## Event Listeners
+
+BullMQ emit events yang bisa lo listen:
+
+```typescript
+// Comprehensive event handling
+emailWorker.on('active', (job) => {
+  console.log(`Job ${job.id} is now active. Processing...`);
+  // Bisa notify user "Job started processing"
+});
+
+emailWorker.on('completed', (job, result) => {
+  console.log(`Job ${job.id} completed with result:`, result);
+  // Bisa notify user "Email sent successfully"
+});
+
+emailWorker.on('failed', (job, err) => {
+  console.log(`Job ${job?.id} failed after ${job?.attemptsMade} attempts`);
+  console.error('Error:', err.message);
+
+  // Kalo permanent failed, notify user
+  if (job?.attemptsMade >= 3) {
+    // Notify: "Email failed to send. Please try again."
+  }
+});
+
+emailWorker.on('stalled', (job) => {
+  console.warn(`Job ${job?.id} stalled. Will be retried.`);
+  // Job stuck, will be automatically retried
+});
+
+emailWorker.on('progress', (job, progress) => {
+  console.log(`Job ${job.id} progress: ${progress}%`);
+  // Update progress di database/WebSocket
+});
+```
+
+## Error Handling Best Practices
+
+### Retry Logic
+
+```typescript
+const worker = new Worker('email-send', async (job) => {
+  try {
+    // Process job
+    await sendEmail(job.data);
+    return { success: true };
+  } catch (error: any) {
+    // Check if retryable error
+    if (error.code === 'ECONNREFUSED') {
+      // Connection error | retry
+      throw error; // BullMQ akan retry automatically
+    }
+
+    if (error.code === 'INVALID_EMAIL') {
+      // Non-retryable error | don't throw
+      return { success: false, reason: 'Invalid email address' };
+    }
+
+    // Unknown error | retry
+    throw error;
+  }
+}, {
+  connection,
+  limiter: {
+    max: 10,    // Max 10 jobs
+    duration: 1000, // per 1 detik
+  },
+  backoff: {
+    type: 'exponential',
+    delay: 1000, // 1s, 2s, 4s, 8s...
+  },
+});
+```
+
+### Dead Letter Queue
+
+Jobs yang gagal setelah semua retry attempts disebut "dead":
+
+```typescript
+// Setup dead letter queue
+const deadLetterQueue = new Queue('dead-letter', { connection });
+
+emailWorker.on('failed', async (job, err) => {
+  if (job?.attemptsMade >= job.opts.attempts) {
+    // Move to dead letter queue
+    await deadLetterQueue.add('failed-email', {
+      originalJob: job.data,
+      error: err.message,
+      failedAt: new Date(),
+      attempts: job.attemptsMade,
+    });
+
+    console.log(`Job ${job.id} moved to dead letter queue`);
+  }
+});
+```
+
+## Graceful Shutdown
+
+Worker harus handle shutdown dengan bener:
+
+```typescript
+// workers/email.worker.ts
+async function shutdown() {
+  console.log('Received shutdown signal...');
+
+  // Stop accepting new jobs
+  await emailWorker.close();
+
+  // Wait untuk jobs yang sedang berjalan selesai (max 30 detik)
+  const activeJobs = await emailWorker.getActiveJobs();
+
+  if (activeJobs.length > 0) {
+    console.log(`Waiting for ${activeJobs.length} active jobs to complete...`);
+
+    await Promise.race([
+      Promise.all(activeJobs.map(job => job.waitUntilFinished())),
+      new Promise(resolve => setTimeout(resolve, 30000)) // Max 30s
+    ]);
+  }
+
+  console.log('Worker shutdown complete');
+  process.exit(0);
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+```
+
+## Testing Workers
+
+Testing worker itu penting. Lo mau pastiin job di-process dengan bener:
+
+```typescript
+// __tests__/email.worker.test.ts
+import { Queue, Worker } from 'bullmq';
+import Redis from 'ioredis';
+import { addEmailJob } from '../lib/queue/email.queue';
+
+// Mock email sender
+jest.mock('../lib/email/sender', () => ({
+  sendOTPEmail: jest.fn().mockResolvedValue({ sent: true }),
+  sendWelcomeEmail: jest.fn().mockResolvedValue({ sent: true }),
+}));
+
+describe('Email Worker', () => {
+  let queue: Queue;
+  let worker: Worker;
+
+  beforeEach(async () => {
+    const connection = new Redis(process.env.REDIS_URL);
+
+    // Clear existing jobs
+    await connection.flushdb();
+
+    // Setup queue and worker
+    queue = new Queue('email-send-test', { connection });
+    worker = new Worker('email-send-test', async (job) => {
+      // Process sesuai template
+    }, { connection });
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+  });
+
+  afterEach(async () => {
+    await worker.close();
+    await queue.close();
+  });
+
+  it('should process OTP email job', async () => {
+    // Add job
+    const job = await addEmailJob({
+      to: 'test@example.com',
+      template: 'otp',
+      data: { name: 'Test', otp: '123456' }
+    });
+
+    // Wait for processing
+    const completedJob = await job.waitUntilFinished();
+
+    expect(completedJob.status).toBe('completed');
+    expect(completedJob.returnvalue).toEqual({ sent: true });
+  }, 10000);
+});
+```
+
+## Complete Setup Flow
+
+Ini summary complete dari Part 1 sampe Part 3:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Complete System                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐                                               │
+│  │   API Server  │                                               │
+│  │  /register    │──▶ await addEmailJob() ──▶ Response OK       │
+│  └──────────────┘                              (50ms)            │
+│                                                          │
+│  ┌──────────────┐                                        │
+│  │  Redis Queue │◀── Job queued                          │
+│  │  (email-send)│                                        │
+│  └──────────────┘                                        │
+│          │                                                 │
+│          │                                                 │
+│          ▼                                                 │
+│  ┌──────────────┐                                        │
+│  │   Worker      │──▶ process job                        │
+│  │ (email-send) │──▶ send email (3s)                    │
+│  │ concurrency:5 │──▶ complete!                          │
+│  └──────────────┘                                        │
+│          │                                                 │
+│          ▼                                                 │
+│  ┌──────────────┐                                        │
+│  │  SMTP Server │──▶ Email delivered to user!            │
+│  └──────────────┘                                        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Start Semua Components
+
+```bash
+# Terminal 1: API Server
+npm run dev
+
+# Terminal 2: Email Worker
+npx ts-node workers/email.worker.ts
+
+# Terminal 3: PDF Worker
+npx ts-node workers/pdf.worker.ts
+
+# Or semua sekaligus dengan PM2
+pm2 start ecosystem.config.js
+```
+
+## Kesimpulan
+
+Di part ini, lo udah bikin:
+
+**Worker System:**
+- Email worker yang process OTP, welcome, password reset
+- PDF worker yang generate reports
+- Worker dengan proper event listeners
+- Progress tracking
+- Error handling dan retry logic
+- Graceful shutdown
+
+**Yang lo punya sekarang:**
+- API yang fast (50ms response)
+- Queue system yang robust
+- Worker yang process jobs di background
+- Retry logic automatic
+- Dead letter queue buat failed jobs
+- Job monitoring via Bull Board
+
+**Flow lengkap:**
+1. User hit API | API add job ke queue | Response 50ms
+2. Worker pick up job | Process (email/PDF) | 3-30 detik
+3. User dapet result via notification, polling, atau email
+
+Series ini udah lengkap. Lo sekarang punya background jobs system yang production-ready!
+
+Kalo ada pertanyaan atau mau tau lebih dalam tentang specific part, comment aja bro.
+
+Stay fast, stay reliable!
+
+---
+
+*Previous: [Part 1] Konsep Dasar Background Jobs*
+*Previous: [Part 2] Setup Redis dan BullMQ*

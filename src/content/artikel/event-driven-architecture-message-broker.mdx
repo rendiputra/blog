@@ -1,0 +1,1096 @@
+---
+title: "Event-Driven Architecture: Bikin Microservices Lu Ngobrol Pake Message Broker"
+description: "Naik level dari request-response REST API. Gue bakal ceritain konsep Pub/Sub dengan Kafka atau RabbitMQ. Jelasin gimana service lu bisa kerja secara decoupled dan nggak bikin efek domino pas salah satu service lagi down."
+pubDate: 2026-06-10
+tags: ["event-driven", "pub-sub", "microservices", "message-broker", "kafka", "rabbitmq", "backend", "architecture"]
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Oke, skenario time.
+
+Lo punya microservices. User register, langsung:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Request-Response Flow                        │
+│                                                              │
+│   User Service ───────▶ Email Service                         │
+│        │                         │                             │
+│        │    "Kirim welcome email"                             │
+│        │                         │                             │
+│        │                         ▼                             │
+│        │                   [Email Sent]                       │
+│        │                         │                             │
+│        │    ◀────── "Email sent" ──────                      │
+│        │                         │                             │
+│        ◀──────── "201 Created" ──────────                     │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+User registration berhasil kalau email terkirim. Email service down? Registration failed.
+
+Ini namanya **coupled system**. Service A depends on Service B. B down? A juga down.
+
+Sekarang bayangin kalo lo punya 10 services yang saling depend:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Coupled System Chaos                        │
+│                                                              │
+│   Auth ──────▶ Email ──────▶ SMS ──────▶ Analytics          │
+│     │                                                       │
+│     └──▶ Payment ──────▶ Inventory ──────▶ Notification      │
+│           │                                               │
+│           └──▶ Shipping ──────▶ Warehouse                   │
+│                                                              │
+│   Result: If ANY service is down, everything breaks          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Kekacauan.
+
+Lo butuh cara services ngobrol tanpa saling depend langsung. Solusinya? **Event-Driven Architecture dengan Message Broker**.
+
+Di artikel ini, gue bakal jelasin gimana bikin microservices yang decoupled. Services bisa communicate tanpa harus aware satu sama lain. Dan kalo satu service down? Services lain tetep jalan.
+
+Let's go!
+
+## Kenapa REST Request-Response Nggak Selalu Cukup?
+
+REST itu bagus untuk banyak hal. Tapi ada scenario di mana request-response itu problematic.
+
+### Scenario: Long-Running Process
+
+```
+User: "Generate laporan bulanan"
+
+Service: "Oke, laporan 200 halaman nih. Loading 30 detik..."
+
+User: *timeout after 10 seconds*
+User: *refresh page*
+User: "Error?"
+
+Reality: Laporan lagi digenerate, tapi browser timeout.
+```
+
+### Scenario: Multiple Services Need Same Event
+
+```
+User register:
+| Auth Service: butuh notify
+| Email Service: butuh kirim welcome email
+| Analytics Service: butuh track new user
+| Notification Service: butuh notify admin
+| Audit Service: butuh log registration
+
+Lo mau API Auth nge-call 5 services sekaligus?
+```
+
+### Scenario: One Service Down Breaks All
+
+```
+Order Service calls:
+| Payment Service (down)
+| Inventory Service (down)
+| Email Service (down)
+
+Result: User can't place order because external services are down.
+```
+
+Ini semua solvable dengan **async messaging**.
+
+## Apa Itu Event-Driven Architecture?
+
+Event-Driven Architecture itu pattern di mana services communicate lewat **events** (messages) alih-alih direct calls.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Event-Driven Flow                          │
+│                                                              │
+│   User Service ───────▶ [Message Broker]                     │
+│        │                        │                           │
+│        │     "user.registered"   │                           │
+│        │     event published     ▼                           │
+│        │            ┌───────────────────────────┐         │
+│        │            │                           │         │
+│        │    Email Service ◀┤   Analytics ◀┤      │         │
+│        │    (subscribe)  │   (subscribe) │      │         │
+│        │            │                           │         │
+│        │            └───────────────────────────┘         │
+│        │                                                      │
+│        ◀────────── "201 Created" ────────────                │
+│                                                              │
+│   Email Service & Analytics jalan secara async                │
+│   User registration NOT blocked by email/analytics            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key concept:** Services nggak talk langsung. Mereka publish events ke message broker, dan services lain subscribe ke events yang mereka butuhin.
+
+## Pub/Sub Pattern
+
+Pub/Sub = Publisher/Subscriber. Ini core pattern di event-driven architecture.
+
+### Components
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Message Broker                          │
+│                                                              │
+│   Publishers (Producers)              Subscribers (Consumers)  │
+│   ────────────────────              ────────────────────────  │
+│                                                              │
+│   ┌─────────────┐                    ┌─────────────┐        │
+│   │ Auth       │───user.created───▶│ Email       │        │
+│   │ Service    │                    │ Service     │        │
+│   └─────────────┘                    └─────────────┘        │
+│                                                              │
+│   ┌─────────────┐                    ┌─────────────┐        │
+│   │ Order      │──order.placed─────▶│ Inventory  │        │
+│   │ Service    │                    │ Service     │        │
+│   └─────────────┘                    └─────────────┘        │
+│                                                              │
+│   ┌─────────────┐                    ┌─────────────┐        │
+│   │ Payment    │──payment.done─────▶│ Analytics   │        │
+│   │ Service    │                    │ Service     │        │
+│   └─────────────┘                    └─────────────┘        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Publishers** | Ngirim events, nggak tau siapa yang subscribe
+**Subscribers** | Nampung events, nggak tau siapa yang publish
+**Topic/Queue** | Channel di mana events di-pass
+
+## Message Broker Options
+
+Ada beberapa message broker yang popular:
+
+```
+| Broker | Best For | Characteristics |
+|--------|----------|-----------------|
+| RabbitMQ | General purpose | Mature, flexible routing, easy setup |
+| Apache Kafka | High throughput | Distributed, persistent, replay |
+| Redis Pub/Sub | Simple use cases | In-memory, no persistence |
+| AWS SQS/SNS | Cloud-native | Managed service, scalable |
+| Google Pub/Sub | GCP ecosystem | Managed, global |
+```
+
+### RabbitMQ vs Kafka
+
+```
+RabbitMQ:
+| Pros:
+|   - Simpler setup
+|   - Flexible routing (exchanges, bindings, routing keys)
+|   - Lightweight
+|   - Good untuk general purpose
+|
+| Cons:
+|   - Not built for massive scale
+|   - Messages deleted setelah di-consume
+|   - No replay capability
+|
+| Best for: SME applications, task queues, async tasks
+
+Kafka:
+| Pros:
+|   - Massive throughput (millions msg/sec)
+|   - Persistent messages (can replay)
+|   - Distributed (clustering, replication)
+|   - Exactly-once semantics
+|
+| Cons:
+|   - More complex
+|   - Higher resource usage
+|   - Steeper learning curve
+|
+| Best for: High-volume, real-time analytics, event sourcing
+```
+
+**Rekomendasi gue:**
+
+```
+Simpel project / learning: RabbitMQ
+High volume / production: Kafka
+Cloud-native / AWS: SQS + SNS
+```
+
+## Setup RabbitMQ dengan Docker
+
+Oke, sekarang praktiknya. Lo bakal setup RabbitMQ dengan Docker Compose.
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"    # AMQP protocol
+      - "15672:15672"  # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin123
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - messaging
+
+  api:
+    build: ./api
+    container_name: api
+    environment:
+      - RABBITMQ_URL=amqp://admin:admin123@rabbitmq:5672
+    depends_on:
+      - rabbitmq
+    networks:
+      - messaging
+
+volumes:
+  rabbitmq_data:
+
+networks:
+  messaging:
+    driver: bridge
+```
+
+Jalankan:
+
+```bash
+docker-compose up -d
+
+# Buka RabbitMQ Management UI
+# http://localhost:15672
+# Login: admin / admin123
+```
+
+## Publish-Subscribe dengan RabbitMQ
+
+Sekarang gue bakal implementasi pattern pub/sub dengan Node.js.
+
+### Publisher: Auth Service
+
+```javascript
+// services/auth/publisher.js
+const amqp = require('amqplib');
+
+const RABBITMQ_URL = process.env.RABBITMQ_URL;
+
+async function publishEvent(routingKey, payload) {
+  const connection = await amqp.connect(RABBITMQ_URL);
+  const channel = await connection.createChannel();
+
+  // Declare exchange (tempat events dipublish)
+  const exchange = 'user_events';
+  await channel.assertExchange(exchange, 'topic', { durable: true });
+
+  // Publish event
+  const message = Buffer.from(JSON.stringify(payload));
+  channel.publish(exchange, routingKey, message, {
+    persistent: true,
+    contentType: 'application/json',
+    timestamp: Date.now(),
+  });
+
+  console.log(`Published: ${routingKey}`, payload);
+
+  await channel.close();
+  await connection.close();
+}
+
+// Event types
+const EVENTS = {
+  USER_CREATED: 'user.created',
+  USER_UPDATED: 'user.updated',
+  USER_DELETED: 'user.deleted',
+  USER_LOGGED_IN: 'user.logged_in',
+};
+
+module.exports = { publishEvent, EVENTS };
+```
+
+```javascript
+// services/auth/auth.service.js
+const { publishEvent, EVENTS } = require('./publisher');
+const bcrypt = require('bcrypt');
+const { User } = require('../models');
+
+async function registerUser(data) {
+  const { email, password, name } = data;
+
+  // Hash password
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  // Create user
+  const user = await User.create({
+    email,
+    password: hashedPassword,
+    name,
+  });
+
+  // Publish event (async, fire-and-forget)
+  // Auth service nggak tau siapa yang subscribe
+  await publishEvent(EVENTS.USER_CREATED, {
+    userId: user.id,
+    email: user.email,
+    name: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
+  return user;
+}
+
+async function loginUser(email, password) {
+  const user = await User.findOne({ where: { email } });
+
+  if (!user) {
+    throw new Error('Invalid credentials');
+  }
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) {
+    throw new Error('Invalid credentials');
+  }
+
+  // Publish login event
+  await publishEvent(EVENTS.USER_LOGGED_IN, {
+    userId: user.id,
+    email: user.email,
+    timestamp: new Date().toISOString(),
+  });
+
+  return { user, token: generateToken(user) };
+}
+```
+
+### Subscriber: Email Service
+
+```javascript
+// services/email/consumer.js
+const amqp = require('amqplib');
+
+const RABBITMQ_URL = process.env.RABBITMQ_URL;
+
+async function startConsumer() {
+  const connection = await amqp.connect(RABBITMQ_URL);
+  const channel = await connection.createChannel();
+
+  // Declare exchange yang sama
+  const exchange = 'user_events';
+  await channel.assertExchange(exchange, 'topic', { durable: true });
+
+  // Declare queue spesifik untuk email service
+  const queue = 'email_service_queue';
+  await channel.assertQueue(queue, { durable: true });
+
+  // Bind queue ke exchange dengan routing patterns
+  // Email service cuma mau events yang related ke user
+  await channel.bindQueue(queue, exchange, 'user.*');
+
+  // Set prefetch (process 1 message at a time)
+  channel.prefetch(1);
+
+  console.log('Email service waiting for messages...');
+
+  // Consume messages
+  channel.consume(queue, async (msg) => {
+    if (msg === null) return;
+
+    try {
+      const routingKey = msg.fields.routingKey;
+      const payload = JSON.parse(msg.content.toString());
+
+      console.log(`Received: ${routingKey}`, payload);
+
+      // Handle based on event type
+      switch (routingKey) {
+        case 'user.created':
+          await sendWelcomeEmail(payload);
+          break;
+
+        case 'user.deleted':
+          await handleUserDeletion(payload);
+          break;
+
+        case 'user.logged_in':
+          await trackLoginActivity(payload);
+          break;
+
+        default:
+          console.log(`Unknown event: ${routingKey}`);
+      }
+
+      // Acknowledge message
+      channel.ack(msg);
+    } catch (error) {
+      console.error('Error processing message:', error);
+      // Reject and requeue (will retry)
+      channel.nack(msg, false, true);
+    }
+  });
+}
+
+async function sendWelcomeEmail(payload) {
+  const { email, name } = payload;
+  // Send email logic
+  console.log(`Sending welcome email to ${email}`);
+  await emailProvider.send({
+    to: email,
+    subject: 'Welcome to Our App!',
+    template: 'welcome',
+    data: { name },
+  });
+}
+
+module.exports = { startConsumer };
+```
+
+### Subscriber: Analytics Service
+
+```javascript
+// services/analytics/consumer.js
+const amqp = require('amqplib');
+
+async function startConsumer() {
+  const connection = await amqp.connect(RABBITMQ_URL);
+  const channel = await connection.createChannel();
+
+  const exchange = 'user_events';
+  await channel.assertExchange(exchange, 'topic', { durable: true });
+
+  // Analytics service punya queue sendiri
+  const queue = 'analytics_service_queue';
+  await channel.assertQueue(queue, { durable: true });
+
+  // Subscribe ke SEMUA user events
+  await channel.bindQueue(queue, exchange, 'user.*');
+
+  channel.prefetch(10);
+
+  channel.consume(queue, async (msg) => {
+    if (msg === null) return;
+
+    try {
+      const routingKey = msg.fields.routingKey;
+      const payload = JSON.parse(msg.content.toString());
+
+      // Track semua user events untuk analytics
+      await trackEvent(routingKey, payload);
+
+      channel.ack(msg);
+    } catch (error) {
+      console.error('Error:', error);
+      channel.nack(msg, false, true);
+    }
+  });
+}
+
+async function trackEvent(routingKey, payload) {
+  const { userId, timestamp } = payload;
+
+  // Store to analytics database
+  await AnalyticsEvent.create({
+    event: routingKey,
+    userId,
+    metadata: payload,
+    timestamp: new Date(timestamp),
+  });
+
+  // Update user metrics
+  await updateUserMetrics(userId, routingKey);
+}
+```
+
+## RabbitMQ Routing Patterns
+
+RabbitMQ support berbagai routing patterns dengan **exchanges**.
+
+### Exchange Types
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Exchange Types                               │
+│                                                              │
+│   fanout | Kirim ke semua bound queues                       │
+│           | user.created ──▶ [Queue A] [Queue B] [Queue C]   │
+│                                                              │
+│   direct  | Kirim berdasarkan exact routing key               │
+│           | order.created ──▶ [payment_queue]               │
+│           | order.placed  ──▶ [inventory_queue]           │
+│                                                              │
+│   topic   | Kirim berdasarkan pattern matching               │
+│           | user.*       ──▶ [user_queues]                 │
+│           | *.created    ──▶ [all_created_events]          │
+│           | user.created  ──▶ [specific_queue]              │
+│                                                              │
+│   headers  | Kirim berdasarkan headers, bukan routing key    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Example: Topic Exchange
+
+```javascript
+// Routing patterns
+await channel.bindQueue(queue, exchange, 'user.created');    // Exact match
+await channel.bindQueue(queue, exchange, 'user.*');           // Any user event
+await channel.bindQueue(queue, exchange, '*.created');       // Any created event
+await channel.bindQueue(queue, exchange, '#');                // All events
+```
+
+## Setup Apache Kafka dengan Docker
+
+Sekarang alternatif | Apache Kafka untuk high-throughput scenarios.
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.kafka.yml
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    networks:
+      - kafka-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - kafka-net
+
+networks:
+  kafka-net:
+    driver: bridge
+```
+
+Jalankan:
+
+```bash
+docker-compose -f docker-compose.kafka.yml up -d
+
+# Buka Kafka UI
+# http://localhost:8080
+```
+
+## Publish-Subscribe dengan Kafka
+
+Sekarang implementasi dengan Kafka.
+
+### Kafka Producer
+
+```javascript
+// services/auth/producer.js
+const { Kafka } = require('kafkajs');
+
+const kafka = new Kafka({
+  clientId: 'auth-service',
+  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
+});
+
+const producer = kafka.producer();
+
+async function publishEvent(topic, payload) {
+  await producer.connect();
+
+  await producer.send({
+    topic,
+    messages: [
+      {
+        key: payload.userId?.toString(), // Partition key
+        value: JSON.stringify(payload),
+        headers: {
+          eventType: topic,
+          timestamp: Date.now().toString(),
+        },
+      },
+    ],
+  });
+
+  console.log(`Published to ${topic}:`, payload);
+
+  await producer.disconnect();
+}
+
+// Topics
+const TOPICS = {
+  USER_EVENTS: 'user-events',
+  ORDER_EVENTS: 'order-events',
+  PAYMENT_EVENTS: 'payment-events',
+};
+
+module.exports = { publishEvent, TOPICS };
+```
+
+```javascript
+// services/auth/auth.service.js
+const { publishEvent, TOPICS } = require('./producer');
+
+async function registerUser(data) {
+  const user = await User.create(data);
+
+  // Publish event to Kafka
+  await publishEvent(TOPICS.USER_EVENTS, {
+    type: 'USER_CREATED',
+    userId: user.id,
+    email: user.email,
+    name: user.name,
+    timestamp: Date.now(),
+  });
+
+  return user;
+}
+```
+
+### Kafka Consumer
+
+```javascript
+// services/email/consumer.js
+const { Kafka } = require('kafkajs');
+
+const kafka = new Kafka({
+  clientId: 'email-service',
+  brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
+});
+
+const consumer = kafka.consumer({ groupId: 'email-service-group' });
+
+async function startConsumer() {
+  await consumer.connect();
+
+  await consumer.subscribe({
+    topic: 'user-events',
+    fromBeginning: false,
+  });
+
+  await consumer.run({
+    eachMessage: async ({ topic, partition, message }) => {
+      const payload = JSON.parse(message.value.toString());
+      const { type } = payload;
+
+      console.log(`Received: ${type} from partition ${partition}`);
+
+      try {
+        switch (type) {
+          case 'USER_CREATED':
+            await handleUserCreated(payload);
+            break;
+
+          case 'USER_DELETED':
+            await handleUserDeleted(payload);
+            break;
+
+          default:
+            console.log(`Unknown event type: ${type}`);
+        }
+      } catch (error) {
+        console.error('Error processing message:', error);
+        // In production, implement dead letter queue
+      }
+    },
+  });
+}
+
+async function handleUserCreated(payload) {
+  const { email, name } = payload;
+  console.log(`Sending welcome email to ${email}`);
+  await emailService.send({ to: email, template: 'welcome', name });
+}
+```
+
+## Event-Driven Benefits
+
+Sekarang lo tau gimana implementasinya. Mari kita bahas benefits-nya.
+
+### 1. Decoupled Services
+
+```
+Coupled (Request-Response):
+| Service A ────▶ Service B
+| B down? A also down
+| A harus tau B's API, auth, error handling
+| Hard to evolve independently
+
+Event-Driven:
+| Service A ────▶ [Broker] ────▶ Service B
+| B down? A continues (messages queued)
+| A doesn't care about B's existence
+| Easy to add/remove services
+```
+
+### 2. No Cascading Failures
+
+```
+Scenario: Email service down
+
+Coupled:
+| User registers
+| Auth calls Email Service
+| Email Service timeout (10s)
+| Auth returns error to user
+| User sees "Registration failed"
+| User frustrated
+
+Event-Driven:
+| User registers
+| Auth publishes "user.created" event
+| Auth returns "201 Created" immediately
+| Email Service (down) missed event
+| Email Service (up) later: re-processes from offset
+| User sees "Registration successful"
+| Email sent (maybe delayed)
+| User happy
+```
+
+### 3. Scalability
+
+```
+Scenario: Black Friday sale
+
+Coupled:
+| Payment service gets 10x traffic
+| Payment service crashes
+| Order service crashes
+| Whole system down
+
+Event-Driven:
+| Payment events queued
+| Payment service scales to 10x instances
+| Workers process queue gradually
+| Other services unaffected
+| System stays up
+```
+
+### 4. Audit Trail
+
+```
+Event log = immutable record of everything
+
+Benefits:
+| Replay events for debugging
+| Rebuild state from event history
+| Analytics on past events
+| Compliance requirements
+| Event sourcing pattern
+```
+
+## Event Schema Design
+
+Ini yang penting | design events yang consistent.
+
+### Event Structure
+
+```typescript
+// Generic event structure
+interface Event {
+  id: string;           // Unique event ID (UUID)
+  type: string;         // Event type (e.g., "USER_CREATED")
+  source: string;        // Service that published (e.g., "auth-service")
+  timestamp: string;     // ISO 8601 timestamp
+  version: string;       // Schema version (e.g., "1.0")
+  data: {               // Payload (varies per event)
+    // Event-specific fields
+  };
+  metadata?: {           // Optional metadata
+    correlationId?: string;
+    causationId?: string;
+    userId?: string;
+  };
+}
+```
+
+### Example Events
+
+```json
+{
+  "id": "evt_abc123",
+  "type": "ORDER_PLACED",
+  "source": "order-service",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "version": "1.0",
+  "data": {
+    "orderId": "ord_456",
+    "userId": "usr_789",
+    "items": [
+      { "productId": "prod_1", "quantity": 2, "price": 50000 }
+    ],
+    "total": 100000,
+    "paymentMethod": "credit_card"
+  },
+  "metadata": {
+    "correlationId": "corr_xyz",
+    "userId": "usr_789"
+  }
+}
+```
+
+## Idempotency
+
+Ini yang critical | events bisa arrive more than once.
+
+### Problem
+
+```
+Producer sends event
+Broker delivers event
+Consumer processes event
+Consumer crashes before ack
+Broker re-delivers event
+Consumer processes same event AGAIN
+Duplicate processing = bad
+```
+
+### Solution: Idempotency
+
+```javascript
+async function handleOrderPlaced(payload) {
+  const { orderId } = payload;
+
+  // Check if already processed
+  const existing = await ProcessedEvent.findOne({
+    where: { eventId: payload.metadata?.correlationId }
+  });
+
+  if (existing) {
+    console.log(`Event ${payload.id} already processed, skipping`);
+    return;
+  }
+
+  // Process the event
+  await processOrder(orderId);
+
+  // Mark as processed
+  await ProcessedEvent.create({
+    eventId: payload.metadata?.correlationId || payload.id,
+    processedAt: new Date(),
+    payload,
+  });
+}
+```
+
+### Idempotency Key Design
+
+```typescript
+// Use deterministic key based on event content
+const idempotencyKey = crypto
+  .createHash('sha256')
+  .update(`${payload.type}:${payload.data.orderId}`)
+  .digest('hex');
+```
+
+## Dead Letter Queue
+
+Kalo message gagal diproses berkali-kali, kirim ke DLQ.
+
+### RabbitMQ DLQ
+
+```javascript
+// Setup DLQ
+const dlxExchange = 'dlx_exchange';
+const dlqQueue = 'email_dlq';
+
+await channel.assertExchange(dlxExchange, 'fanout', { durable: true });
+await channel.assertQueue(dlqQueue, { durable: true });
+await channel.bindQueue(dlqQueue, dlxExchange, '');
+
+// Main queue with DLQ
+await channel.assertQueue('email_queue', {
+  durable: true,
+  arguments: {
+    'x-dead-letter-exchange': dlxExchange,
+    'x-message-ttl': 86400000, // 24 hours
+  },
+});
+```
+
+### Kafka DLQ
+
+```javascript
+// Consumer with retry and DLQ
+async function processWithRetry(message) {
+  const maxRetries = 3;
+  let attempt = 0;
+
+  while (attempt < maxRetries) {
+    try {
+      await processMessage(message);
+      return; // Success, exit
+    } catch (error) {
+      attempt++;
+      console.error(`Attempt ${attempt} failed:`, error);
+
+      if (attempt >= maxRetries) {
+        // Send to DLQ
+        await sendToDLQ(message, error);
+        return;
+      }
+
+      // Exponential backoff
+      await sleep(Math.pow(2, attempt) * 1000);
+    }
+  }
+}
+```
+
+## Best Practices
+
+### 1. Design Events untuk Consumers
+
+```
+Events should contain ALL info consumers need
+Don't make consumers query other services
+```
+
+```javascript
+// ❌ Bad: Incomplete event
+{ "userId": "123" }
+
+// Consumers need to call User Service to get details
+
+// ✅ Good: Complete event
+{
+  "userId": "123",
+  "email": "user@example.com",
+  "name": "John Doe",
+  "createdAt": "2024-01-15T10:30:00Z"
+}
+```
+
+### 2. Version Your Events
+
+```typescript
+// Add version field
+interface Event {
+  version: '1.0' | '2.0' | '2.1';
+}
+
+// Handle backward compatibility
+switch (event.version) {
+  case '1.0':
+    // Handle v1 format
+    break;
+  case '2.0':
+  case '2.1':
+    // Handle v2 format
+    break;
+}
+```
+
+### 3. Monitor Queue Depth
+
+```yaml
+# Alert if queue is growing
+alert:
+  expr: rabbitmq_queue_messages{queue="email_queue"} > 1000
+  for: 5m
+  annotations:
+    summary: "Email queue is backing up"
+```
+
+### 4. Handle Failures Gracefully
+
+```javascript
+// Circuit breaker pattern
+const circuitBreaker = new CircuitBreaker(handleMessage, {
+  timeout: 3000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 10000,
+});
+
+circuitBreaker.fallback(() => {
+  // Return gracefully when circuit is open
+  console.log('Circuit open, message will be retried later');
+});
+
+channel.consume(queue, async (msg) => {
+  await circuitBreaker.execute(msg);
+});
+```
+
+## Kesimpulan
+
+Lo udah belajar gimana Event-Driven Architecture bisa bikin microservices lu lebih resilient:
+
+**Core Concepts:**
+- Pub/Sub pattern | Publishers and subscribers don't know each other
+- Message Broker | Central hub for events
+- Decoupled services | Independent, can fail independently
+
+**RabbitMQ:**
+- Flexible routing dengan exchanges
+- Good untuk general purpose
+- Simpler setup
+
+**Kafka:**
+- High throughput, persistent
+- Good untuk event sourcing, analytics
+- More complex
+
+**Benefits:**
+
+```
+Event-Driven Architecture:
+| 1. Decoupled | Services evolve independently
+| 2. Resilience | One service down doesn't break others
+| 3. Scalability | Queue absorbs traffic spikes
+| 4. Audit Trail | Immutable event log
+| 5. Flexibility | Add consumers without touching publishers
+
+When to use:
+| ✅ Multiple services need same event
+| ✅ Long-running processes
+| ✅ Services with different lifecycles
+| ✅ Need audit trail
+| ✅ High-volume, real-time processing
+
+When NOT to use:
+| ❌ Simple request-response (overkill)
+| ❌ Low-latency sync requirements
+| ❌ Simple CRUD apps
+```
+
+**The Takeaway:**
+
+REST request-response itu bagus untuk synchronous operations. Tapi kalo microservices lu mulai complex, event-driven architecture bikin lo bisa scale dan evolve tanpa takut efek domino.
+
+Lo nggak harus migrate semua ke event-driven sekaligus. Mulai dari satu flow | misalnya user registration yang kirim welcome email. Lo bakal see benefits immediately dan bisa expand dari situ.
+
+Giliran lu | identify satu flow di microservices lu yang bisa benefit dari async messaging. Implement, observe, expand.
+
+Kalo ada pertanyaan atau mau gue jelasin bagian tertentu lebih detail, comment aja bro.
+
+Stay event-driven!

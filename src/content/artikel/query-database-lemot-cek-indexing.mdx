@@ -1,0 +1,594 @@
+---
+title: "Query Database Lu Lemot? Coba Cek Indexing-nya Dulu Bro!"
+description: "Lo pernah nggak ngerasain query yang harusnya cepet malah jalan 5 detik? Atau aplikasi web yang loading-nya molor? Kemungkinan besar masalahnya ada di indexing. Yuk kita debug bareng-bareng!"
+pubDate: 2026-09-16
+tags: ["database", "sql", "indexing", "performance", "postgresql", "mysql", "query-optimization"]
+coverImage: "https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1200&h=630&fit=crop"
+---
+
+Oke, gue mau lo jawab pertanyaan ini dengan jujur:
+
+**Lo pernah nge-run query di production dan nunggu... nunggu... nunggu... baru selesai?**
+
+Atau mungkin:
+
+**Lo udah pake database yang powerful, server yang kenceng, tapi aplikasi web lu tetep lemot?**
+
+Kalo jawabannya iya, kemungkinan besar masalahnya bukan di server. Bukan juga di code aplikasi lu.
+
+Masalahnya ada di **cara query lo ke database**.
+
+Dan lebih spesifik lagi? Kemungkinan besar lo butuh **indexing** yang lebih baik.
+
+Di artikel ini, gue bakal tunjukin cara diagnosa query yang lambat dan gimana cara optimize-nya dengan index. Let's go!
+
+## Kenapa Query Bisa Lemot?
+
+Oke, sebelum masuk ke solusi, lo harus paham dulu kenapa query bisa lemot.
+
+### Full Table Scan: Penjara Kinerja Database
+
+Tanpa index, setiap kali lo run query kayak gini:
+
+```sql
+SELECT * FROM users WHERE email = 'john@example.com';
+```
+
+Database-nya bakal kerja kayak gini:
+
+```
+SELECT * FROM users WHERE email = 'john@example.com'
+
+Execution plan:
+-> Table Scan on users  (rows examined: 1,000,000)
+   Condition: email = 'john@example.com'
+   Rows matched: 1
+
+Time: 2.3 detik
+```
+
+Database nggak punya cara lain selain **cek satu per satu dari baris pertama sampai ketemu**. Untuk 1 juta row, ini bisa makan waktu yang lama.
+
+### Beda sama Index
+
+Dengan index yang bener, query yang sama jadi:
+
+```
+SELECT * FROM users WHERE email = 'john@example.com'
+
+Execution plan:
+-> Index Lookup on idx_users_email  (rows examined: 1)
+   Key: email = 'john@example.com'
+
+Time: 0.003 detik
+```
+
+Perbedaannya? **769x lebih cepat.**
+
+## Langkah 1: Identifikasi Query yang Lemot
+
+Oke, sekarang gimana caranya tau query mana yang lemot?
+
+### PostgreSQL: pg_stat_statements
+
+Ini extension yang harus lo install di PostgreSQL:
+
+```sql
+-- Aktifkan extension
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Cek query yang paling sering dan paling lambat
+SELECT
+    query,
+    calls,
+    total_exec_time / 1000 AS total_seconds,
+    mean_exec_time AS mean_ms,
+    stddev_exec_time AS stddev_ms,
+    rows,
+    shared_blks_hit,
+    shared_blks_read
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 20;
+```
+
+Output-nya kayak gini:
+
+```
+query                                        | calls | total_s | mean_ms | rows
+-----------------------------------------------------------------------------------------------------------------
+SELECT * FROM orders WHERE user_id = $1      | 45230 | 8921.3  | 197.3   | 89234
+SELECT * FROM products WHERE category_id = $1| 23400 | 4521.8  | 193.2   | 156000
+SELECT * FROM users WHERE email = $1         | 89000 | 156.4   | 1.8     | 89000
+INSERT INTO logs (...) VALUES (...)          | 234000| 234.5   | 1.0     | 234000
+```
+
+**Yang harus lo perhatiin:**
+- `total_s` | total waktu | ini query yang paling banyak makan waktu
+- `mean_ms` | rata-rata waktu per eksekusi | kalo > 100ms, perlu dicek
+- `calls` | berapa kali dipanggil | query yang sering dipanggil + lambat = prioritas
+
+### MySQL: Slow Query Log
+
+Di MySQL, lo bisa enable slow query log:
+
+```sql
+-- Cek apakah slow query log enable
+SHOW VARIABLES LIKE 'slow_query_log';
+
+-- Enable slow query log
+SET GLOBAL slow_query_log = 'ON';
+SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
+SET GLOBAL long_query_time = 1;  -- Log query yang > 1 detik
+
+-- Atau di my.cnf/my.ini
+[mysqld]
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 1
+```
+
+Terus cek log-nya:
+
+```bash
+tail -f /var/log/mysql/slow.log
+
+# Atau pake mysqldumpslow buat analyze
+mysqldumpslow -t 10 /var/log/mysql/slow.log
+```
+
+### General: EXPLAIN ANALYZE
+
+Ini yang paling penting dan work di semua database:
+
+```sql
+-- PostgreSQL
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT u.name, o.total, o.created_at
+FROM users u
+JOIN orders o ON u.id = o.user_id
+WHERE u.status = 'active'
+AND o.created_at > '2024-01-01'
+ORDER BY o.created_at DESC
+LIMIT 20;
+```
+
+Output-nya bakal nunjukin:
+
+```
+Limit  (cost=0.56..890.34 rows=20 width=48) (actual time=0.045..12.234 rows=20 loops=1)
+  ->  Nested Loop  (cost=0.56..890.34 rows=890 width=48) (actual time=0.043..12.200 rows=20 loops=1)
+        Buffers: shared hit=45 read=234
+        ->  Index Scan using idx_users_status on users u  (cost=0.43..234.56 rows=89 width=24) (actual time=0.021..0.089 rows=89 loops=1)
+              Index Cond: (status = 'active')
+              Buffers: shared hit=34
+        ->  Index Scan using idx_orders_user_id on orders o  (cost=0.13..6.45 rows=10 width=24) (actual time=0.012..0.134 rows=10 loops=89)
+              Index Cond: (user_id = u.id)
+              Filter: (created_at > '2024-01-01'::date)
+              Rows Removed by Filter: 2
+              Buffers: shared hit=890
+Planning Time: 1.234 ms
+Execution Time: 12.567 ms
+```
+
+**Yang harus lo perhatiin:**
+- `cost=0.56..890.34` | estimated cost | makin kecil semakin baik
+- `actual time=0.045..12.234` | actual execution time | ini yang penting
+- `Buffers: shared hit=45 read=234` | buffer hit vs disk read | makin banyak hit semakin baik
+- `Index Scan` vs `Seq Scan` | Index Scan = good, Seq Scan = mungkin butuh index
+
+## Langkah 2: Baca Execution Plan
+
+Execution plan itu peta yang nunjukin gimana database mengeksekusi query lo. Lo harus bisa baca ini.
+
+### Tanda-Tanda Query yang Perlu Di-optimize
+
+```
+❌ Tanda-tanda query bermasalah:
+
+1. Seq Scan pada tabel besar
+   -> Seq Scan on users  (rows examined: 1,000,000)
+   Ini berarti nggak ada index yang dipake
+
+2. Nested Loop dengan banyak rows
+   -> Nested Loop  (rows=1,000,000)
+   Cross join yang nggak disengaja
+
+3. Sort pada hasil yang besar
+   -> Sort  (Sort Key: created_at)
+       Sort Method: external merge  Disk: 1234kB
+   Sorting di disk = slow
+
+4. High disk reads
+   Buffers: shared hit=100 read=50000
+   Banyak read dari disk = bottleneck
+
+✅ Tanda-tanda query yang bagus:
+
+1. Index Scan / Index Only Scan
+   -> Index Scan using idx_users_email on users
+   Index dipake dengan optimal
+
+2. Hash Join
+   -> Hash Join  (cost=0.00..1234.56 rows=5678)
+   Join yang efficient
+
+3. Bitmap Heap Scan
+   -> Bitmap Heap Scan on products
+   Multiple index dikombinasikan dengan efficient
+```
+
+### Contoh: Sebelum dan Sesudah Indexing
+
+**Query yang bermasalah:**
+
+```sql
+EXPLAIN ANALYZE
+SELECT * FROM orders
+WHERE customer_id = 123
+AND status = 'completed'
+AND created_at > '2024-01-01';
+
+-- Output SEBELUM index:
+Limit  (cost=0.00..45892.34 rows=50 width=156) (actual time=2345.678..2345.890 rows=50 loops=1)
+  ->  Seq Scan on orders  (cost=0.00..45892.34 rows=23456 width=156) (actual time=2345.678..2345.890 rows=50 loops=1)
+        Filter: (customer_id = 123 AND status = 'completed' AND created_at > '2024-01-01')
+        Rows Removed by Filter: 23406
+
+Planning Time: 0.5 ms
+Execution Time: 2345.9 ms  <-- 2.3 detik! Lemot!
+```
+
+**Query yang sama, SESUDAH index:**
+
+```sql
+-- Buat index yang cover semua filter
+CREATE INDEX idx_orders_customer_status_date
+ON orders(customer_id, status, created_at DESC);
+
+-- Jalankan ulang
+EXPLAIN ANALYZE
+SELECT * FROM orders
+WHERE customer_id = 123
+AND status = 'completed'
+AND created_at > '2024-01-01';
+
+-- Output SESUDAH index:
+Limit  (cost=0.56..123.45 rows=50 width=156) (actual time=0.123..0.456 rows=50 loops=1)
+  ->  Index Scan using idx_orders_customer_status_date on orders  (cost=0.56..123.45 rows=50 width=156) (actual time=0.123..0.456 rows=50 loops=1)
+        Index Cond: (customer_id = 123 AND status = 'completed' AND created_at > '2024-01-01')
+
+Planning Time: 0.3 ms
+Execution Time: 0.5 ms  <-- 0.5 milidetik! 4692x lebih cepat!
+```
+
+## Langkah 3: Buat Index yang Tepat
+
+Oke, sekarang lo udah identify query yang lemot. Gimana caranya bikin index yang tepat?
+
+### 1. Index untuk WHERE Clause
+
+```sql
+-- Query:
+SELECT * FROM products
+WHERE category_id = 5
+AND price > 100000;
+
+-- Index yang tepat:
+CREATE INDEX idx_products_category_price
+ON products(category_id, price);
+
+-- Atau lebih specific lagi:
+CREATE INDEX idx_products_filter
+ON products(category_id)
+INCLUDE (price, name, stock);  -- PostgreSQL only
+```
+
+### 2. Index untuk JOIN
+
+```sql
+-- Query dengan JOIN:
+SELECT o.id, o.total, u.name
+FROM orders o
+JOIN users u ON o.user_id = u.id
+WHERE u.region = 'jakarta';
+
+-- Index yang dibutuhkan:
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+CREATE INDEX idx_users_region ON users(region);
+```
+
+### 3. Index untuk ORDER BY
+
+```sql
+-- Query dengan ORDER BY:
+SELECT * FROM posts
+WHERE published = true
+ORDER BY created_at DESC
+LIMIT 10;
+
+-- Index yang optimal:
+CREATE INDEX idx_posts_published_date
+ON posts(published, created_at DESC);
+
+-- Bisa juga ASC untuk yang lain:
+CREATE INDEX idx_users_name
+ON users(name ASC);
+```
+
+### 4. Composite Index: Urutan Matters!
+
+Ini bagian yang sering orang salah. Urutan kolom di composite index itu penting:
+
+```sql
+-- Query:
+SELECT * FROM orders
+WHERE customer_id = 123
+AND order_date > '2024-01-01'
+AND status = 'completed';
+
+-- ✅ Index yang BENAR (kolom paling selective di depan):
+CREATE INDEX idx_orders_lookup
+ON orders(customer_id, order_date DESC, status);
+
+-- ❌ Index yang SALAH (urutan nggak sesuai query):
+CREATE INDEX idx_orders_wrong
+ON orders(status, customer_id, order_date);
+```
+
+**Kenapa urutan penting?**
+- Kolom pertama harus yang paling sering dipake di WHERE
+- Index bisa skip kolom di depan, tapi nggak bisa skip kolom di tengah
+- Query `WHERE customer_id = 123` bisa pake `idx(customer_id, order_date, status)`
+- Tapi query `WHERE status = 'completed'` nggak bisa pake `idx(customer_id, order_date, status)`
+
+### 5. Partial Index (PostgreSQL Only)
+
+Kalo lo cuma perlu index untuk subset data:
+
+```sql
+-- Tanpa partial index (index semua data):
+CREATE INDEX idx_orders_created
+ON orders(created_at);  -- Semua 10 juta row
+
+-- ✅ Dengan partial index (hanya data yang sering dipake):
+CREATE INDEX idx_orders_recent
+ON orders(created_at)
+WHERE created_at > '2024-01-01';  -- Cuma 30 hari terakhir
+
+-- Atau untuk status tertentu:
+CREATE INDEX idx_orders_completed
+ON orders(customer_id, created_at)
+WHERE status = 'completed';
+```
+
+Partial index lebih kecil dan lebih cepat.
+
+### 6. Covering Index
+
+Index yang include semua kolom yang dibutuhkan query:
+
+```sql
+-- Query:
+SELECT order_id, total, created_at
+FROM orders
+WHERE customer_id = 123
+ORDER BY created_at DESC;
+
+-- ✅ Covering index (PostgreSQL):
+CREATE INDEX idx_orders_covering
+ON orders(customer_id, created_at DESC)
+INCLUDE (order_id, total);
+
+-- ✅ Covering index (MySQL):
+CREATE INDEX idx_orders_covering
+ON orders(customer_id, created_at DESC, order_id, total);
+
+-- Sekarang query ini bisa served langsung dari index!
+-- Nggak perlu akses ke tabel utama (index-only scan)
+```
+
+## Langkah 4: Verifikasi Optimize
+
+Sesudah bikin index, lo harus verifikasi bahwa query lo udah lebih cepat.
+
+```sql
+-- Run EXPLAIN ANALYZE lagi
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT * FROM orders
+WHERE customer_id = 123
+AND status = 'completed'
+AND created_at > '2024-01-01';
+```
+
+**Yang harus lo liat:**
+- `Index Scan` bukan `Seq Scan`
+- `actual time` jauh lebih kecil
+- `rows examined` sesuai ekspektasi (nggak berlebihan)
+
+## Studi Kasus: E-Commerce Dashboard
+
+Gue kasih contoh nyata. Lo punya dashboard e-commerce dengan query ini:
+
+```sql
+-- Dashboard query: Top 10 customers by revenue
+SELECT
+    u.id,
+    u.name,
+    u.email,
+    COUNT(o.id) AS total_orders,
+    SUM(o.total) AS total_revenue,
+    AVG(o.total) AS avg_order_value,
+    MAX(o.created_at) AS last_order_date
+FROM users u
+JOIN orders o ON u.id = o.user_id
+WHERE o.status = 'completed'
+AND o.created_at >= NOW() - INTERVAL '30 days'
+GROUP BY u.id, u.name, u.email
+ORDER BY total_revenue DESC
+LIMIT 10;
+```
+
+### Before Optimization
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT ... (query di atas)
+
+Nested Loop  (cost=23456.78..56789.90 rows=1234 width=89) (actual time=1234.5..4567.8 rows=10 loops=1)
+  Buffers: shared hit=1234 read=45678  <-- Banyak disk reads!
+  ->  Seq Scan on users u  (cost=0.00..12345.67 rows=89000 width=45)
+        Filter: (some condition)
+        Rows Removed by Filter: 88990
+  ->  Index Scan using idx_orders_user_id on orders o  (cost=0.13..0.45 rows=12 width=44) (actual time=0.12..0.34 rows=12 loops=89000)
+
+Execution Time: 4567.8 ms  <-- 4.5 detik! Terlalu lambat!
+```
+
+### After Optimization
+
+```sql
+-- Index baru:
+CREATE INDEX idx_orders_status_date_customer
+ON orders(status, created_at DESC, user_id)
+INCLUDE (total);
+
+CREATE INDEX idx_users_region_active
+ON users(region)
+WHERE status = 'active';
+
+-- Verify
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT ... (query yang sama)
+
+Hash Join  (cost=1234.56..2345.67 rows=1234 width=89) (actual time=45.6..78.9 rows=10 loops=1)
+  Buffers: shared hit=456  <-- Jauh lebih sedikit!
+  ->  Index Scan using idx_orders_status_date_customer on orders o
+        Index Cond: (status = 'completed' AND created_at >= ...)
+        Rows Removed by Filter: 0
+
+Execution Time: 78.9 ms  <-- 0.08 detik! 58x lebih cepat!
+```
+
+## Index Maintenance
+
+Index itu bukan set-and-forget. Lo harus maintain.
+
+### Cek Index Usage
+
+```sql
+-- PostgreSQL: Index yang nggak pernah dipake
+SELECT
+    schemaname,
+    tablename,
+    indexname,
+    idx_scan,
+    idx_tup_read,
+    idx_tup_fetch,
+    pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+Index dengan `idx_scan = 0` berarti nggak pernah dipake. Lo bisa DROP itu.
+
+### Cek Index Bloat
+
+```sql
+-- PostgreSQL: Cek index yang bloated
+SELECT
+    schemaname || '.' || tablename AS table,
+    indexname,
+    pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
+    idx_scan,
+    pg_stat_user_indexes.n_live_tup AS tuple_count,
+    pg_size_pretty(pg_relation_size(indexrelid) / n_live_tup) AS bytes_per_tuple
+FROM pg_stat_user_indexes
+JOIN pg_index USING (indexrelid)
+WHERE idx_scan = 0
+AND indisunique IS FALSE
+ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+### Rebuilt Index
+
+```sql
+-- PostgreSQL: Rebuilt index (vacuum + reindex)
+REINDEX INDEX CONCURRENTLY idx_orders_customer_id;
+
+-- MySQL: Optimize table (rebuilt indexes)
+OPTIMIZE TABLE orders;
+```
+
+## Checklist Optimize Query
+
+Ini step-by-step yang bisa lo ikutin:
+
+```
+Step 1: Identifikasi
+| □ Enable pg_stat_statements / slow query log
+| □ Identify slow queries (> 100ms)
+| □ Identify high-frequency queries
+| □ Focus pada query yang impact-nya terbesar
+
+Step 2: Analyze
+| □ Run EXPLAIN (ANALYZE, BUFFERS)
+| □ Identify Seq Scan pada tabel besar
+| □ Identify missing indexes
+| □ Identify inappropriate joins
+
+Step 3: Optimize
+| □ Buat index untuk WHERE clause
+| □ Buat index untuk JOIN
+| □ Buat index untuk ORDER BY
+| □ Perhatikan urutan kolom di composite index
+| □ Consider partial index
+| □ Consider covering index
+
+Step 4: Verify
+| □ Run EXPLAIN ANALYZE lagi
+| □ Bandingkan execution time
+| □ Bandingkan buffer hits vs reads
+| □ Monitor aplikasi untuk improvement
+
+Step 5: Maintain
+| □ Review index usage secara berkala
+| □ Drop unused indexes
+| □ Handle index bloat
+| □ Update statistics (ANALYZE / ANALYZE TABLE)
+```
+
+## Kesimpulan
+
+Lo udah belajar gimana cara:
+
+**Identifikasi query yang lemot:**
+- pg_stat_statements di PostgreSQL
+- Slow query log di MySQL
+- EXPLAIN ANALYZE untuk execution plan
+
+**Baca execution plan:**
+- Seq Scan vs Index Scan
+- Buffer hits vs reads
+- Cost dan actual time
+
+**Buat index yang tepat:**
+- WHERE clause indexes
+- JOIN indexes
+- ORDER BY indexes
+- Composite index dengan urutan yang bener
+- Partial index dan covering index
+
+**Maintain index:**
+- Cek unused indexes
+- Handle bloat
+- Regular reindex
+
+Query yang lemot itu biasanya solvable dengan index yang tepat. Nggak perlu upgrade server atau migrate ke database lain. Cukup check indexing strategy lo.
+
+Lo sekarang punya tools buat diagnose dan optimize query database. Practice dengan query-query yang lo punya di production. Siapa tau ada quick win yang bisa ngeboost performance significantly!
+
+Kalo ada pertanyaan atau mau gue jelasin lebih detail bagian tertentu, comment aja bro.
+
+Stay fast, stay indexed!

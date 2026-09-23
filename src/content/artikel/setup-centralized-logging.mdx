@@ -1,0 +1,1066 @@
+---
+title: "Setup Centralized Logging: biar Gampang Nyari Root Cause Kalo Server Error"
+description: "Ngelanjutin hype observability. Kalau kemaren udah pake Sentry buat nyatet crash, sekarang kita bahas logging biasa. Bikin setup stack kayak Grafana Loki atau ELK biar lu bisa nge-search log dari berbagai container di satu dashboard keren."
+pubDate: 2026-06-22
+tags: ["logging", "observability", "devops", "elasticsearch", "loki", "grafana", "elk", "docker", "monitoring"]
+coverImage: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200&h=630&fit=crop"
+---
+
+Oke, skenario yang familiar.
+
+Lo punya aplikasi yang jalan di 5 containers Docker. Tiba-tiba user complaint | "Bang, ada error di checkout!"
+
+Lo buka terminal:
+
+```bash
+# Cek logs container 1
+docker logs container-api-1 2>&1 | grep error
+
+# Cek logs container 2
+docker logs container-api-2 2>&1 | grep error
+
+# Cek logs container 3
+docker logs container-api-3 2>&1 | grep error
+
+# Cek logs container worker
+docker logs container-worker 2>&1 | grep error
+
+# Cek logs nginx
+docker logs container-nginx 2>&1 | grep error
+```
+
+Lo scroll sana-sini, switch tab, copy-paste. 10 menit later, lo nemu errornya di container-api-2.
+
+**Masalahnya:** Lo harus login ke 5 tempat berbeda cuma buat nyari log. Dan ini cuma 1 server. Gimana kalo 10 servers?
+
+Lo butuh **centralized logging system**.
+
+Di artikel ini, gue bakal tunjukin cara setup **Grafana Loki** atau **ELK Stack** buat centralized logging. Lo bakal bisa:
+
+- Nyari log dari semua containers dalam 1 dashboard
+- Filter by time, container name, error level
+- Search dengan regex
+- Visualize log patterns
+- Alert pas ada error tertentu
+
+Let's go!
+
+## Kenapa Lo Butuh Centralized Logging?
+
+Oke, pertama lo harus paham kenapa ini penting.
+
+### Problem Tanpa Centralized Logging
+
+```
+Tanpa Centralized Logging:
+| Container 1 | Logs di terminal / file terpisah
+| Container 2 | Logs di terminal / file terpisah
+| Container 3 | Logs di terminal / file terpisah
+| Server 1 | SSH, cek manually
+| Server 2 | SSH, cek manually
+| Server 3 | SSH, cek manually
+
+Problems:
+| 1. Must login ke banyak tempat
+| 2. Logs ilang pas container restart
+| 3. Can't search across all containers
+| 4. No historical context
+| 5. Debugging = nightmare
+```
+
+### Solution: Centralized Logging
+
+```
+Dengan Centralized Logging:
+┌─────────────────────────────────────────────────────────────┐
+│                      Grafana Dashboard                         │
+│                                                              │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ Search: "error" + Filter: container=api + time=1hr │   │
+│   │                                                      │   │
+│   │ Log entries:                                         │   │
+│   │ [10:23:45] container-api-1 | ERROR | User checkout  │   │
+│   │ [10:23:46] container-api-2 | ERROR | DB timeout   │   │
+│   │ [10:23:47] container-worker | WARN  | Retry...      │   │
+│   └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │                     │
+          ┌─────────▼─────────┐ ┌───────▼────────┐
+          │   Loki / ES       │ │  Grafana        │
+          │   (Log Storage)   │ │  (Dashboard)    │
+          └───────────────────┘ └────────────────┘
+                    │
+     ┌──────────────┼──────────────┐
+     │              │              │
+┌────▼────┐  ┌─────▼────┐  ┌────▼────┐
+│Container 1│ │Container 2│  │Container 3│
+└───────────┘ └───────────┘ └───────────┘
+```
+
+**Benefits:**
+- 1 dashboard buat semua logs
+- Real-time log streaming
+- Powerfull search
+- Historical data
+- Alerting
+
+## Pilihan: Loki vs ELK
+
+Lo punya 2 opsi utama:
+
+```
+Grafana Loki:
+| Pros:
+|   - Simpler setup
+|   - Lower resource usage
+|   - Integrates seamlessly dengan Grafana
+|   - Label-based indexing (faster queries)
+| Cons:
+|   - Fitur search没那么 powerful dibanding ES
+|   - Less mature ecosystem
+
+ELK Stack (Elasticsearch + Logstash + Kibana):
+| Pros:
+|   - Full-text search yang powerful
+|   - More mature
+|   - Rich visualization
+| Cons:
+|   - Heavy (banyak RAM needed)
+|   - Complex setup
+|   - Resource intensive
+```
+
+**Rekomendasi gue:**
+
+```
+Development / Small scale | Grafana Loki (simple, lightweight)
+Production / Large scale | ELK (powerful, scalable)
+```
+
+Di artikel ini, gue bakal cover keduanya.
+
+## Setup: Grafana Loki + Docker
+
+Oke, sekarang praktiknya. Lo bakal setup Loki dengan Docker Compose.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    docker-compose.yml                           │
+│                                                              │
+│   ┌──────────────┐                                            │
+│   │   Grafana   │ ◀─── Dashboard (port 3000)               │
+│   └──────┬───────┘                                            │
+│          │                                                   │
+│   ┌──────▼───────┐                                            │
+│   │     Loki     │ ◀─── Log Storage (port 3100)             │
+│   └──────────────┘                                            │
+│          │                                                   │
+│   ┌──────▼───────┐                                            │
+│   │ Promtail     │ ◀─── Log Collector (runs as agent)       │
+│   └──────────────┘                                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.monitoring.yml
+version: '3.8'
+
+services:
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - loki
+    networks:
+      - monitoring
+
+  # Loki Log Aggregator
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+    networks:
+      - monitoring
+
+  # Promtail Log Collector (for host logs)
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - /var/log:/var/log:ro
+      - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - monitoring
+
+  # Docker driver for container logs (runs as plugin)
+  # Ini akan ng收集 semua container logs otomatis
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  grafana_data:
+  loki_data:
+```
+
+### Loki Configuration
+
+```yaml
+# loki-config.yaml
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+  max_chunk_age: 1h
+  chunk_target_size: 1048576
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: boltdb
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 168h
+
+storage_config:
+  boltdb:
+    directory: /loki/index
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+chunk_store_config:
+  max_look_back_period: 72h
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 72h
+```
+
+### Promtail Configuration
+
+```yaml
+# promtail-config.yaml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Collect Docker container logs
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container_name
+
+  # Collect application logs
+  - job_name: application
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: app-logs
+          host: localhost
+          __path__: /var/log/myapp/*.log
+
+  # Collect Nginx logs
+  - job_name: nginx
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          host: localhost
+          __path__: /var/log/nginx/*.log
+```
+
+### Docker Logging Driver untuk Container Logs
+
+Ini yang penting | configure Docker buat kirim logs ke Loki automatically.
+
+```bash
+# Install Docker logging driver
+# (Loki Docker driver comes with Grafana Cloud, but for self-hosted we use fluentd/fluent-bit)
+
+# Alternative: Use Promtail as sidecar atau Docker logging driver
+
+# Option 1: Docker json-file dengan tail
+# Tambahin di docker-compose.yml service:
+
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+```
+
+**Better approach: Fluent Bit**
+
+```yaml
+# docker-compose.monitoring.yml (updated)
+services:
+  # ... existing services ...
+
+  # Fluent Bit buat collect container logs
+  fluent-bit:
+    image: cr.fluentbit.io/fluent/fluent-bit:latest
+    container_name: fluent-bit
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./fluent-bit.conf:/fluent-bit.conf:ro
+    ports:
+      - "2020:2020"
+    networks:
+      - monitoring
+```
+
+```ini
+# fluent-bit.conf
+[SERVICE]
+    Flush        5
+    Log_Level    info
+    Daemon       off
+
+[INPUT]
+    Name              tail
+    Path              /var/lib/docker/containers/*/*-json.log
+    Parser            docker
+    Tag               docker.*
+    Refresh_Interval  5
+
+[FILTER]
+    Name                parser
+    Match               docker.*
+    Key_name            log
+    Parser              json
+    Reserve_Data        On
+
+[OUTPUT]
+    Name              loki
+    Match              docker.*
+    Host              loki
+    Port              3100
+    Labels             job=docker,host=$HOSTNAME
+```
+
+## Setup Grafana Data Source
+
+Sekarang configure Grafana buat connect ke Loki.
+
+### Via GUI
+
+1. Buka `http://localhost:3000`
+2. Login | admin / admin123
+3. Menu | Configuration | Data Sources
+4. Klik "Add data source"
+5. Pilih "Loki"
+6. URL: `http://loki:3100`
+7. Klik "Save & Test"
+
+### Via Provisioning (Recommended)
+
+```yaml
+# grafana/provisioning/datasources/loki.yml
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+```
+
+## Setup ELK Stack
+
+Sekarang alternatif | ELK Stack. Ini lebih heavy tapi lebih powerful.
+
+### Architecture ELK
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      ELK Stack                                │
+│                                                              │
+│   ┌──────────────┐    ┌──────────────┐    ┌────────────┐ │
+│   │   Logstash   │───▶│ Elasticsearch │◀───│  Kibana    │ │
+│   │   (Parse)    │    │  (Storage)   │    │(Dashboard) │ │
+│   └──────────────┘    └──────────────┘    └────────────┘ │
+│          │                                                        │
+│   ┌──────▼──────┐                                               │
+│   │  Beats      │                                               │
+│   │ (Collection)│                                               │
+│   └─────────────┘                                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.elk.yml
+version: '3.8'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=docker-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - elk
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: logstash
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "5044:5044"
+    environment:
+      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+
+  # Filebeat buat collect container logs
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: filebeat
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+      - logstash
+
+networks:
+  elk:
+    driver: bridge
+
+volumes:
+  es_data:
+```
+
+### Logstash Pipeline
+
+```ruby
+# logstash/pipeline/logstash.conf
+input {
+  beats {
+    port => 5044
+  }
+
+  # Also accept logs via HTTP
+  http {
+    port => 8080
+    codec => json
+  }
+}
+
+filter {
+  # Parse JSON logs
+  if [message] =~ /^\{/ {
+    json {
+      source => "message"
+      target => "parsed"
+    }
+  }
+
+  # Add timestamp if not present
+  if ![parsed][timestamp] {
+    mutate {
+      add_field => { "[@metadata][timestamp]" => "%{+YYYY-MM-dd'T'HH:mm:ss.SSSZ}" }
+    }
+  }
+
+  # Extract fields from parsed JSON
+  if [parsed] {
+    mutate {
+      rename => {
+        "[parsed][level]" => "log_level"
+        "[parsed][message]" => "log_message"
+        "[parsed][service]" => "service_name"
+        "[parsed][trace_id]" => "trace_id"
+        "[parsed][user_id]" => "user_id"
+      }
+    }
+  }
+
+  # Handle Docker container logs
+  if [container] {
+    mutate {
+      add_field => {
+        "container_name" => "%{[container][name]}"
+        "container_image" => "%{[container][image]"
+      }
+    }
+  }
+
+  # Categorize by log level
+  if [log_level] {
+    if [log_level] =~ /error|Error|ERROR/ {
+      mutate {
+        add_tag => ["error"]
+      }
+    }
+    if [log_level] =~ /warn|Warn|WARN/ {
+      mutate {
+        add_tag => ["warning"]
+      }
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["elasticsearch:9200"]
+    index => "logs-%{+YYYY.MM.dd}"
+  }
+
+  # Also output to stdout for debugging
+  stdout {
+    codec => rubydebug
+  }
+}
+```
+
+### Filebeat Configuration
+
+```yaml
+# filebeat/filebeat.yml
+filebeat.inputs:
+  - type: container
+    id: container-logs
+    paths:
+      - /var/lib/docker/containers/*/*-json.log
+
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_docker_metadata: ~
+  - decode_json_fields:
+      fields: ["message"]
+      target: ""
+      overwrite_keys: true
+      add_error_key: true
+
+output.logstash:
+  hosts: ["logstash:5044"]
+
+logging.level: info
+```
+
+## Search Logs di Grafana
+
+Nah, sekarang bagian yang seru | gimana search logs.
+
+### Basic Search
+
+```
+# Di Grafana Explore (Loki):
+
+# Search semua logs
+{job="docker"}
+
+# Filter by container name
+{container_name=~"api-.*"}
+
+# Filter by error level
+{container_name=~"api.*"} |= "ERROR"
+
+# Filter by multiple conditions
+{container_name=~"api.*"} |= "ERROR" != "timeout"
+
+# Regex search
+{container_name=~"api.*"} |~ "user_[0-9]+"
+```
+
+**Operators:**
+```
+|= Contains (case-sensitive)
+|!= Does not contain
+|~ Regex match
+!~ Regex does not match
+```
+
+### LogQL: Loki Query Language
+
+```logql
+# Count errors per minute
+sum by (container_name) (rate({container_name=~"api.*"} |~ "ERROR"[5m]))
+
+# Top 10 containers by log volume
+topk(10, sum by (container_name) (count_over_time({job="docker"}[1h])))
+
+# Error rate over time
+sum by (level) (rate({container_name=~"api.*"} | json | level="error"[5m]))
+
+# Slow requests (> 1 second)
+{container_name=~"api.*"} | json | duration > 1000
+
+# User-specific logs
+{container_name=~"api.*"} | json | user_id="12345"
+```
+
+### Grafana Dashboard
+
+Buat dashboard buat overview:
+
+```json
+{
+  "title": "Application Logs Dashboard",
+  "panels": [
+    {
+      "title": "Log Volume by Container",
+      "type": "piechart",
+      "targets": [
+        {
+          "expr": "sum by (container_name) (rate({job=\"docker\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (container_name) (rate({job=\"docker\"} |~ \"ERROR\"[5m]))"
+        }
+      ]
+    },
+    {
+      "title": "Recent Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{job=\"docker\"}"
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Search Logs di Kibana
+
+Kalo pake ELK, search di Kibana.
+
+### Basic Search
+
+```
+# All logs
+*
+
+# Specific field
+level:ERROR
+
+# Multiple conditions
+level:ERROR AND service:api
+
+# Wildcard
+service:api*
+
+# Range
+@timestamp:[now-1h TO now]
+```
+
+### Kibana Query Language (KQL)
+
+```
+# Boolean
+level:ERROR AND (service:api OR service:worker)
+
+# Existence
+exists:user_id
+
+# Wildcard
+message:user_*
+
+# Numeric range
+duration:>1000
+```
+
+## Setup Alerting
+
+Lo juga bisa alert pas ada error tertentu.
+
+### Grafana Alert (Loki)
+
+```yaml
+# grafana/provisioning/alerts/log-alerts.yml
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Log Alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: error-alert
+        title: High Error Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: sum(rate({container_name=~"api.*"} |~ "ERROR"}[5m])) > 0
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    type: last
+              datasourceUid: __expr__
+              expression: A
+              type: threshold
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              expression: B
+              type: threshold
+              refId: C
+        for: 1m
+        annotations:
+          summary: High error rate detected
+          description: "More than 0 errors per second in the last 5 minutes"
+        labels:
+          severity: critical
+```
+
+### Kibana Alert (Elasticsearch)
+
+1. Stack Management | Rules and Connectors
+2. Create rule | Elasticsearch query
+3. Set condition | `level:ERROR`
+4. Set action | Slack, email, atau webhook
+
+## Structured Logging Best Practices
+
+Ini yang penting | lo harus logging dalam format yang searchable.
+
+### Format yang Benar
+
+```javascript
+// ❌ BAD: Plain text logs
+console.log('User logged in');
+console.log('Error: connection timeout');
+console.log('Processing order 12345');
+
+// ✅ GOOD: Structured JSON logs
+console.log(JSON.stringify({
+  timestamp: new Date().toISOString(),
+  level: 'info',
+  message: 'User logged in',
+  userId: '12345',
+  ip: '192.168.1.1',
+  userAgent: 'Mozilla/5.0...'
+}));
+
+console.log(JSON.stringify({
+  timestamp: new Date().toISOString(),
+  level: 'error',
+  message: 'Connection timeout',
+  service: 'payment-service',
+  error: {
+    name: 'TimeoutError',
+    message: 'Connection refused',
+    stack: error.stack
+  },
+  requestId: 'req-12345'
+}));
+```
+
+### Logging Levels
+
+```
+FATAL | System down, immediate action needed
+ERROR | Error yang affecting request/user
+WARN  | Warning, tapi process continues
+INFO  | Normal operation events
+DEBUG | Detailed debugging information
+TRACE | Very detailed, for development only
+```
+
+### Winston Logger Setup
+
+```javascript
+// src/utils/logger.js
+const winston = require('winston');
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: {
+    service: process.env.SERVICE_NAME || 'api',
+    version: process.env.npm_package_version,
+    environment: process.env.NODE_ENV
+  },
+  transports: [
+    // Console output
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+});
+
+// Add file transport for production
+if (process.env.NODE_ENV === 'production') {
+  logger.add(new winston.transports.File({
+    filename: 'logs/error.log',
+    level: 'error'
+  }));
+  logger.add(new winston.transports.File({
+    filename: 'logs/combined.log'
+  }));
+}
+
+module.exports = logger;
+```
+
+### Usage
+
+```javascript
+// src/services/user.service.js
+const logger = require('../utils/logger');
+
+async function createUser(data) {
+  try {
+    const user = await User.create(data);
+
+    logger.info('User created', {
+      userId: user.id,
+      email: user.email,
+      action: 'create_user'
+    });
+
+    return user;
+  } catch (error) {
+    logger.error('Failed to create user', {
+      error: error.message,
+      stack: error.stack,
+      email: data.email,
+      action: 'create_user'
+    });
+
+    throw error;
+  }
+}
+```
+
+## Production Considerations
+
+### Resource Planning
+
+```
+Development:
+| Loki + Grafana | 2GB RAM cukup
+| ELK | 8GB+ RAM
+
+Production:
+| Loki | 4-8GB RAM
+| ELK | 16-32GB RAM
+
+Log Retention:
+| 7 days | Development
+| 30 days | Small production
+| 90+ days | Enterprise
+```
+
+### Security
+
+```yaml
+# Loki dengan authentication
+auth_enabled: true
+
+# Generate API key
+docker exec loki loki-admin tokens generate
+
+# Kibana with authentication
+environment:
+  - ELASTICSEARCH_USERNAME=elastic
+  - ELASTICSEARCH_PASSWORD=changeme
+```
+
+### Log Rotation
+
+```bash
+# Loki: configured di loki-config.yaml
+limits_config:
+  retention_period: 72h
+
+# Elasticsearch: ILM Policy
+# Delete indexes older than 30 days
+PUT _ilm/policy/logs-policy
+{
+  "policy": {
+    "phases": {
+      "delete": {
+        "min_age": "30d"
+      }
+    }
+  }
+}
+```
+
+## Kesimpulan
+
+Lo udah belajar gimana setup centralized logging system:
+
+**Grafana Loki Stack:**
+- Loki buat log storage
+- Promtail buat collect logs
+- Grafana buat dashboard
+- Docker logging driver buat container logs
+
+**ELK Stack:**
+- Elasticsearch buat storage
+- Logstash buat parse logs
+- Kibana buat dashboard
+- Filebeat buat collect logs
+
+**Search Capabilities:**
+- Loki: LogQL buat filter dan aggregate
+- Kibana: KQL buat full-text search
+
+**Benefits:**
+
+```
+Dengan Centralized Logging:
+| 1. Single source of truth | Semua logs di satu tempat
+| 2. Powerful search | Filter by container, time, error level
+| 3. Historical data | Liat logs dari days/weeks ago
+| 4. Alerting | Notification pas ada error tertentu
+| 5. Correlation | Trace error across services
+| 6. Debugging | Past errors jadi lebih gampang dilacak
+
+Setup process:
+| 1. Deploy Loki/ELK dengan Docker
+| 2. Setup log collector (Promtail/Filebeat)
+| 3. Configure structured logging di app
+| 4. Setup Grafana/Kibana dashboard
+| 5. Setup alerts untuk critical errors
+| 6. Enjoy peaceful debugging
+```
+
+**The Takeaway:**
+
+Centralized logging itu bukan luxury | it's essential buat production applications. Lo bisa debug errors dalam hitungan detik, bukan scroll through 10 terminal tabs.
+
+Sekarang pas ada error, lo tinggal:
+1. Buka Grafana/Kibana
+2. Search error message
+3. Filter by time dan container
+4. Done | lo tau root cause dalam 1 menit
+
+Gue recommend mulai dengan Grafana Loki karena lebih simple dan lightweight. Kalo butuh fitur yang lebih advanced, baru migrate ke ELK.
+
+Giliran lu | setup centralized logging di project lu. Starting with Loki for simplicity, expand dari situ.
+
+Kalo ada pertanyaan atau mau gue jelasin bagian tertentu lebih detail, comment aja bro.
+
+Stay logged!

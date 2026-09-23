@@ -1,0 +1,497 @@
+---
+title: "Langkah Awal Sebelum Sharding: Table Partitioning di PostgreSQL"
+description: "Tutorial step-by-step setup Range Partitioning di PostgreSQL. Pecah tabel gede berdasarkan tanggal biar query jadi ngacir tanpa harus nambah server."
+pubDate: 2026-08-28
+tags: ["database", "postgresql", "partitioning", "sql", "performance", "tutorial"]
+series: "Jangan Sampai Database Lu Down"
+order: 4
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Di [Part 3](/tutorial/replication-part3-application-integration), lo udah belajar gimana cara bikin aplikasi ngirim baca query ke Slave biar Master nggak kelelahan.
+
+Tapi ada satu level lagi sebelum lo harus nambah server — **Table Partitioning**.
+
+## Kenapa Perlu Partitioning?
+
+Anggap lo punya tabel `transactions` yang isinya:
+
+```
+Total rows: 50 juta
+Ukuran: 45 GB
+Monthly new rows: ~2 juta
+```
+
+Lo mau ambil data bulan ini doang:
+
+```sql
+SELECT * FROM transactions 
+WHERE created_at >= '2026-09-01' AND created_at < '2026-10-01';
+```
+
+Tanpa partitioning, Postgres tetep harus scan **seluruh 45 GB** — meskipun hasilnya cuma 2 juta row.
+
+Dengan partitioning, Postgres tau persis **partisi mana yang harus dibaca**:
+
+```
+transactions_2026_07  |  2 GB  |  Data Juli 2026
+transactions_2026_08  |  2 GB  |  Data Agustus 2026  
+transactions_2026_09  |  2 GB  |  Data September 2026
+transactions_2026_10  |  ~500MB  |  Data Oktober 2026 (ongoing)
+```
+
+Query bulan September? Cuma baca 2 GB, bukan 45 GB.
+
+## Langkah 1: Buat Parent Table
+
+Partitioning di Postgres pake **table inheritance** yang udah disederhanain oleh fitur `PARTITION BY`.
+
+```sql
+CREATE TABLE transactions (
+    id BIGSERIAL,
+    user_id BIGINT NOT NULL,
+    amount DECIMAL(12, 2) NOT NULL,
+    payment_method VARCHAR(50),
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+) PARTITION BY RANGE (created_at);
+```
+
+**Kunci di sini:**
+
+| Component | Fungsi |
+|-----------|--------|
+| `BIGSERIAL` | Auto-increment, support billions of rows |
+| `DECIMAL(12, 2)` | Akurasi untuk nominal (max 10 miliar) |
+| `PARTITION BY RANGE (created_at)` | Ini yang bikin magic happens |
+
+Lo **nggak pernah insert ke parent table** — semua data masuk ke child partitions.
+
+## Langkah 2: Buat Partisi Awal
+
+Lo perlu bikin partisi untuk range tertentu. Biasanya berdasarkan bulan:
+
+```sql
+-- Partisi untuk Q3 2026
+CREATE TABLE transactions_2026_07 PARTITION OF transactions
+    FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+
+CREATE TABLE transactions_2026_08 PARTITION OF transactions
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+
+CREATE TABLE transactions_2026_09 PARTITION OF transactions
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+
+CREATE TABLE transactions_2026_10 PARTITION OF transactions
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+```
+
+Format `FOR VALUES FROM ... TO ...`:
+- `FROM` | Inclusive (termasuk tanggal ini)
+- `TO` | Exclusive (tidak termasuk tanggal ini)
+- Jadi `('2026-07-01') TO ('2026-08-01')` = semua data Juli 2026
+
+Verifikasi:
+
+```sql
+SELECT 
+    relname AS partition_name,
+    pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+FROM pg_stat_user_tables
+WHERE relname LIKE 'transactions_2026%'
+ORDER BY relname;
+```
+
+Output:
+
+```
+partition_name    | total_size
+------------------+------------
+transactions      | 0 bytes    (parent)
+transactions_2026_07 | 0 bytes
+transactions_2026_08 | 0 bytes
+transactions_2026_09 | 0 bytes
+transactions_2026_10 | 0 bytes
+```
+
+## Langkah 3: Insert Data Test
+
+Masukin dummy data biar bisa liat bedanya:
+
+```sql
+-- Insert data bulan Juli
+INSERT INTO transactions (user_id, amount, payment_method, status, created_at)
+SELECT 
+    (random() * 10000)::bigint,
+    (random() * 1000000)::decimal(12, 2),
+    (ARRAY['ewallet', 'bank_transfer', 'credit_card', 'debit'])[floor(random() * 4 + 1)],
+    'completed',
+    '2026-07-15'::timestamp + (random() * interval '15 days')
+FROM generate_series(1, 50000);
+
+-- Insert data bulan Agustus
+INSERT INTO transactions (user_id, amount, payment_method, status, created_at)
+SELECT 
+    (random() * 10000)::bigint,
+    (random() * 1000000)::decimal(12, 2),
+    (ARRAY['ewallet', 'bank_transfer', 'credit_card', 'debit'])[floor(random() * 4 + 1)],
+    'completed',
+    '2026-08-10'::timestamp + (random() * interval '20 days')
+FROM generate_series(1, 75000);
+
+-- Insert data bulan September
+INSERT INTO transactions (user_id, amount, payment_method, status, created_at)
+SELECT 
+    (random() * 10000)::bigint,
+    (random() * 1000000)::decimal(12, 2),
+    (ARRAY['ewallet', 'bank_transfer', 'credit_card', 'debit'])[floor(random() * 4 + 1)],
+    'completed',
+    '2026-09-05'::timestamp + (random() * interval '20 days')
+FROM generate_series(1, 100000);
+```
+
+Cek distribusi data:
+
+```sql
+SELECT 
+    tableoid::regclass::text AS partition,
+    COUNT(*) AS row_count
+FROM transactions
+GROUP BY tableoid::regclass::text
+ORDER BY partition;
+```
+
+Output:
+
+```
+partition         | row_count
+------------------+----------
+transactions_2026_07 |    50,000
+transactions_2026_08 |    75,000
+transactions_2026_09 |   100,000
+(3 rows)
+```
+
+## Langkah 4: Lihat Partition Pruning in Action
+
+Partition pruning = Postgres otomatis **lewatin** partisi yang nggak relevan.
+
+### Tanpa Partition (jika parent table):
+
+```sql
+EXPLAIN SELECT * FROM transactions 
+WHERE created_at >= '2026-08-01' AND created_at < '2026-09-01';
+```
+
+Output:
+
+```
+Gather  (cost=...)
+  ->  Parallel Seq Scan on transactions_2026_08 transactions
+```
+
+Notice: dia langsung **cuma scan `transactions_2026_08`** — nggak scan partisi lain.
+
+### Cek Explain Plan:
+
+```sql
+EXPLAIN SELECT * FROM transactions 
+WHERE created_at >= '2026-08-01' AND created_at < '2026-09-01';
+```
+
+Output:
+
+```
+Append  (cost=...)
+  ->  Seq Scan on transactions_2026_08 transactions_1
+       Filter: ((created_at >= '2026-08-01') AND (created_at < '2026-09-01'))
+```
+
+Tuh, dia cuma scan `transactions_2026_08`. Partisi Juli dan September? **Di-skip**.
+
+### Bandingin: Query Tanpa Index
+
+Tanpa index, Postgres tetep harus scan seluruh partisi yang relevan:
+
+```sql
+EXPLAIN ANALYZE SELECT * FROM transactions 
+WHERE created_at >= '2026-08-01' AND created_at < '2026-09-01';
+```
+
+Output (contoh):
+
+```
+Seq Scan on transactions_2026_08  (cost=...) (actual time=...)
+  Filter: ((created_at >= '2026-08-01') AND (created_at < '2026-09-01'))
+  Rows Removed by Filter: 0
+Planning Time: 0.5 ms
+Execution Time: 45.2 ms
+```
+
+45 ms untuk 75,000 rows — coba bayangin kalo itu 50 juta rows tanpa partitioning.
+
+### Dengan Index (Recommended):
+
+```sql
+CREATE INDEX idx_transactions_created_at ON transactions (created_at);
+```
+
+Index otomatis dibuat di **setiap partisi** (inherited).
+
+```sql
+EXPLAIN ANALYZE SELECT * FROM transactions 
+WHERE created_at >= '2026-08-01' AND created_at < '2026-09-01';
+```
+
+Output:
+
+```
+Index Scan using idx_transactions_created_at on transactions_2026_08
+  Index Cond: ((created_at >= '2026-08-01') AND (created_at < '2026-09-01'))
+Execution Time: 12.5 ms
+```
+
+Dari 45ms → 12.5ms. **3.6x lebih cepat**.
+
+## Langkah 5: Setup Auto-Partition Creation
+
+Ini bagian yang sering dilupain — lo harus bikin partisi baru **sebelum** bulan baru dimulai.
+
+### Script Otomatis (bash + psql):
+
+```bash
+#!/bin/bash
+# create_partition.sh
+
+CURRENT=$(date +%Y-%m)
+NEXT_MONTH=$(date -d "+1 month" +%Y-%m)
+
+PARTITION_NAME="transactions_${NEXT_MONTH//-/_}"
+START_DATE="${NEXT_MONTH}-01"
+END_DATE=$(date -d "+2 month" +%Y-%m-%d)
+
+# Check if partition exists
+EXISTS=$(psql -t -c "SELECT EXISTS (
+    SELECT 1 FROM pg_tables 
+    WHERE tablename = '$PARTITION_NAME'
+);")
+
+if [ "$EXISTS" = " f" ]; then
+    psql -c "CREATE TABLE ${PARTITION_NAME} PARTITION OF transactions
+        FOR VALUES FROM ('$START_DATE') TO ('$END_DATE');"
+    echo "Created partition: $PARTITION_NAME"
+else
+    echo "Partition $PARTITION_NAME already exists"
+fi
+```
+
+Jalankan tiap awal bulan via cron:
+
+```bash
+# Crontab - edit
+0 0 25 * * /opt/scripts/create_partition.sh
+```
+
+Artinya: tiap tanggal 25, script jalan — bikin partisi bulan depan.
+
+### Alternatif: Fungsi Otomatis dengan PL/pgSQL:
+
+```sql
+CREATE OR REPLACE FUNCTION create_monthly_partition()
+RETURNS void AS $$
+DECLARE
+    partition_date date;
+    partition_name text;
+    start_date text;
+    end_date text;
+BEGIN
+    -- Create partition for next month
+    partition_date := date_trunc('month', CURRENT_DATE + interval '1 month');
+    partition_name := 'transactions_' || to_char(partition_date, 'YYYY_MM');
+    start_date := to_char(partition_date, 'YYYY-MM-DD');
+    end_date := to_char(partition_date + interval '1 month', 'YYYY-MM-DD');
+    
+    EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %I PARTITION OF transactions 
+         FOR VALUES FROM (%L) TO (%L)',
+        partition_name, start_date, end_date
+    );
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Jalankan manual atau via pg_cron:
+
+```sql
+SELECT create_monthly_partition();
+```
+
+## Langkah 6: Maintenance Partisi
+
+### Drop Old Partitions (Data Retention)
+
+Misal lo cuma mau simpen 12 bulan terakhir:
+
+```sql
+-- Hapus partisi lama
+DROP TABLE transactions_2025_07;
+```
+
+Atau bikin fungsi untuk auto-drop:
+
+```sql
+CREATE OR REPLACE FUNCTION drop_old_partitions(months_to_keep int DEFAULT 12)
+RETURNS void AS $$
+DECLARE
+    partition_date date;
+    partition_name text;
+    cutoff_date date;
+BEGIN
+    cutoff_date := CURRENT_DATE - (months_to_keep || ' months')::interval;
+    
+    FOR partition_name IN 
+        SELECT tablename FROM pg_tables 
+        WHERE tablename LIKE 'transactions_%' 
+        AND schemaname = 'public'
+    LOOP
+        partition_date := to_date(
+            substring(partition_name from 'transactions_(\d{4}_\d{2})'), 
+            'YYYY_MM'
+        );
+        
+        IF partition_date < cutoff_date THEN
+            EXECUTE format('DROP TABLE %I', partition_name);
+            RAISE NOTICE 'Dropped: %', partition_name;
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Usage:
+
+```sql
+-- Simpen 12 bulan terakhir
+SELECT drop_old_partitions(12);
+
+-- Atau cuma 3 bulan (testing/archival)
+SELECT drop_old_partitions(3);
+```
+
+### Attach/Detach Partitions
+
+Lo bisa detach partisi, operate单独, trus attach ulang:
+
+```sql
+-- Detach partisi
+ALTER TABLE transactions DETACH PARTITION transactions_2026_07;
+
+-- Sekarang transactions_2026_07 bisa di-backup atau analyze单独
+
+-- Attach ulang
+ALTER TABLE transactions ATTACH PARTITION transactions_2026_07
+    FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+```
+
+Ini berguna buat maintenance tanpa downtime.
+
+## Langkah 7: Monitoring dan Best Practices
+
+### Cek Partisi yang Sering Diakses
+
+```sql
+SELECT 
+    schemaname,
+    relname AS table_name,
+    seq_scan,
+    idx_scan,
+    n_tup_ins AS inserts,
+    n_tup_upd AS updates,
+    n_tup_del AS deletes
+FROM pg_stat_user_tables
+WHERE relname LIKE 'transactions%'
+ORDER BY idx_scan DESC;
+```
+
+### Best Practices Checklist
+
+```
+Partitioning Checklist:
+| [ ] Parent table pake PARTITION BY RANGE
+| [ ] Partisi bulanan (YYYY_MM format)
+| [ ] Index di setiap partisi (created_at)
+| [ ] Auto-create script jalan tiap bulan
+| [ ] Auto-drop script untuk data retention
+| [ ] Monitor partition size tiap minggu
+| [ ] Test restore dari partisi individual
+```
+
+### Batas Partisi
+
+PostgreSQL max columns per table: **1600**
+
+Ini bukan masalah untuk partitioning bulanan (1600 bulan = 133 tahun), tapi lo harus aware kalo bikin partisi per-day untuk logging.
+
+## Perbandingan: Sebelum vs Sesudah
+
+| Metric | Tanpa Partition | Dengan Partition |
+|--------|----------------|------------------|
+| Table size | 45 GB | Tiap partisi ~2 GB |
+| Full scan | 45 GB | Cuma partisi yang relevan |
+| Index size | 15 GB | Tiap partisi ~500 MB |
+| VACUUM time | Lama | Lebih cepat (per partisi) |
+| Backup time | 45 GB | Bisa parallel per partisi |
+| Point-in-time recovery | Seluruh table | Bisa restore per partisi |
+
+## Kapan Cukup Partitioning, Kapan Perlu Sharding?
+
+```
+Pertanyaan | Jawaban | Action
+-----------|---------|--------
+Data masih di 1 server? | Ya | Partitioning dulu
+Disk masih cukup? | Ya | Partitioning dulu
+Load masih bisa dihandle 1 server? | Ya | Partitioning dulu
+Server udah maxed out? | Ya | Sharding time
+```
+
+Partitioning = memecah dalam 1 server
+Sharding = memecah ke multiple servers
+
+Lo udah bisa handle **puluhan juta rows** dengan partitioning. Sharding baru perlu kalo satu server physical nggak kuat lagi.
+
+## Kesimpulan
+
+Lo udah belajar:
+
+```
+Part 4 Summary:
+
+Partitioning Basics:
+| 1. Parent table pake PARTITION BY RANGE
+| 2. Child partitions untuk range tertentu
+| 3. Postgres otomatis prune partisi
+
+Setup Steps:
+| 1. Buat parent table dengan partitioning
+| 2. Buat partisi bulanan
+| 3. Insert data (otomatis masuk partisi)
+| 4. Buat index
+| 5. Setup auto-create untuk partisi baru
+| 6. Setup auto-drop untuk data retention
+
+Benefits:
+| - Query lebih cepat (pruning)
+| - Index lebih kecil per partisi
+| - Maintenance lebih gampang
+| - Backup/restore per partisi
+```
+
+Partitioning ini udah cukup untuk majority use case. Kalo lo butuh **scale beyond single server**, baru deh perlu Sharding — tapi itu topic untuk lain hari.
+
+Next, kita bakal bahas gimana **monitoring database performance** biar lo tau kapan partition aja udah cukup dan kapan perlu scale up.
+
+---
+
+*Previous: [Part 3] Application Integration dengan Read/Write Splitting*
+*Next: Monitoring & Alerting untuk Database*

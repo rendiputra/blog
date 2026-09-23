@@ -1,0 +1,30 @@
+---
+// Reading Progress Bar - fixed at top of viewport
+---
+
+<div id="reading-progress" class="fixed top-0 left-0 z-50 h-0.5 w-0 bg-sky-400 transition-none pointer-events-none"></div>
+
+<script>
+    function initReadingProgress() {
+        const progressBar = document.getElementById("reading-progress");
+        if (!progressBar) return;
+
+        function updateProgress() {
+            const scrollTop = window.scrollY;
+            const docHeight =
+                document.documentElement.scrollHeight - window.innerHeight;
+            const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+            progressBar.style.width = `${Math.min(progress, 100)}%`;
+        }
+
+        window.addEventListener("scroll", updateProgress, { passive: true });
+        updateProgress(); // Initial call
+    }
+
+    // Run on DOM ready
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initReadingProgress);
+    } else {
+        initReadingProgress();
+    }
+</script>

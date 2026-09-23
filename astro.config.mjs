@@ -5,8 +5,8 @@ import tailwind from '@astrojs/tailwind';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://rendiputra.github.io',
-  base: '/blog',
+  site: 'https://rendiputra.pages.dev',
+  // base dihapus - deploy langsung ke root domain
 
   output: 'static',
   integrations: [
@@ -22,5 +22,12 @@ export default defineConfig({
   image: {
     // Enable Astro's built-in image optimization for local and remote images
     domains: [],
+  },
+  vite: {
+    build: {
+      rollupOptions: {
+        external: ['/pagefind/pagefind.js'],
+      },
+    },
   },
 });

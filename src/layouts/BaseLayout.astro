@@ -1,6 +1,8 @@
 ---
 import Header from "../components/Header.astro";
 import ThemeScript from "../components/ThemeScript.astro";
+import SearchModal from "../components/SearchModal.astro";
+import BackToTop from "../components/BackToTop.astro";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
@@ -26,6 +28,83 @@ const { title, description = "Tech documentation, tutorials, dan artikel." } =
     <meta name="generator" content={Astro.generator} />
     <title>{title}</title>
     <ThemeScript />
+    <style is:global>
+      /* Scrollbar styles for TOC */
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background-color: rgb(203 213 225);
+        border-radius: 9999px;
+      }
+      .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+        background-color: rgb(71 85 105);
+      }
+      .scrollbar-thin {
+        scrollbar-width: thin;
+        scrollbar-color: rgb(203 213 225) transparent;
+      }
+      .dark .scrollbar-thin {
+        scrollbar-color: rgb(71 85 105) transparent;
+      }
+
+      /* Table horizontal scroll styles */
+      .prose table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .prose table::-webkit-scrollbar {
+        height: 6px;
+      }
+      .prose table::-webkit-scrollbar-track {
+        background: rgb(241 245 249);
+        border-radius: 9999px;
+      }
+      .dark .prose table::-webkit-scrollbar-track {
+        background: rgb(30 41 59);
+      }
+      .prose table::-webkit-scrollbar-thumb {
+        background: rgb(203 213 225);
+        border-radius: 9999px;
+      }
+      .dark .prose table::-webkit-scrollbar-thumb {
+        background: rgb(71 85 105);
+      }
+
+      /* Code block horizontal scroll - preserves ASCII art */
+      .prose pre {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        white-space: pre;
+      }
+      .prose pre code {
+        display: block;
+        white-space: pre;
+        font-family: 'JetBrains Mono', monospace;
+      }
+      .prose pre::-webkit-scrollbar {
+        height: 6px;
+      }
+      .prose pre::-webkit-scrollbar-track {
+        background: rgb(241 245 249);
+        border-radius: 9999px;
+      }
+      .dark .prose pre::-webkit-scrollbar-track {
+        background: rgb(30 41 59);
+      }
+      .prose pre::-webkit-scrollbar-thumb {
+        background: rgb(203 213 225);
+        border-radius: 9999px;
+      }
+      .dark .prose pre::-webkit-scrollbar-thumb {
+        background: rgb(71 85 105);
+      }
+    </style>
   </head>
   <body
     class="bg-white text-slate-700 dark:bg-slate-900 dark:text-slate-300 font-sans min-h-screen antialiased transition-colors duration-300"
@@ -41,5 +120,7 @@ const { title, description = "Tech documentation, tutorials, dan artikel." } =
         <p>&copy; {new Date().getFullYear()} TechBlog. Built with Astro.</p>
       </div>
     </footer>
+    <SearchModal />
+    <BackToTop />
   </body>
 </html>

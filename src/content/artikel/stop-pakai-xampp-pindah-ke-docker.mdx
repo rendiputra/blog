@@ -1,0 +1,596 @@
+---
+title: "Stop Pake XAMPP: Waktunya Lu Pindah ke Docker Buat Local Development"
+description: "Capek sama XAMPP yang bermasalah? MySQL nggak jalan, Port 3306 bentrok, atau config PHP yang ribet? Waktu nya lu switch ke Docker. Nggak serumit yang lu kira!"
+pubDate: 2026-01-28
+tags: ["docker", "xampp", "local-development", "web-dev", "devops", "laravel", "php"]
+coverImage: "https://images.unsplash.com/photo-1605745341112-85968b19335b?w=1200&h=630&fit=crop"
+---
+
+Bro, gue tau lu pernah ngalamin ini:
+
+- Buka XAMPP, Apache-nya nggak mau start. Cek port, 80 ke-pake sama IIS atau Skype.
+- Pas finally jalan, MySQL-nya error. Unable to connect. Buka `my.ini`, ubah sana-sini, restart, masih error.
+- Upgrade PHP? Harus download installer baru, uninstall yang lama, hope nothing breaks.
+- Project baru pake Laravel tapi versi PHP yang beda? Hmm, PHP versi lo sekarang nggak compatible...
+
+Kalau lo ngaku pernah ngalamin salah satu dari itu, ya udah, lu harus baca artikel ini sampai selesai.
+
+**XAMPP emang enak buat mulai belajar PHP**. Tapi begitu project lu makin gede, XAMPP jadi hambar. Dan solusi yang paling masuk akal buat masalah-masalah itu? **Docker**.
+
+## Apa Itu XAMPP dan Kenapa Lu Pake Itu?
+
+ Buat yang belum tau, XAMPP itu adalah **local web server package** yang berisi:
+
+- **Apache** | web server-nya
+- **MariaDB** | database (fork MySQL)
+- **PHP** | bahasa pemrogramannya
+- **Perl** | kadang juga dimasukin
+
+Tujuannya simpel: lu bisa jalanin website PHP di komputer lu tanpa ribet install satu-satu.
+
+### Kenapa XAMPP Populer?
+
+- **Easy install** | klik next-next-finish, selesai.
+- **All-in-one** | Apache, MySQL, PHP dalam satu package.
+- **Biar murah** | gratis, dan sering dipake di tutorial-tutorial PHP untuk pemula.
+
+### Tapi...
+
+Nah, di sinilah masalahnya. XAMPP itu memang "easy", tapi seiring waktu, lu akan nemuin **limitasi** yang bikin lu frustasi.
+
+## Problem-Problematik XAMPP yang Bikin Sdut
+
+### 1. Port Conflict Royale
+
+```bash
+# Buka XAMPP Control Panel...
+# Apache: Error - Port 80 in use by "Unable to open process"!
+```
+
+Bro, port 80 itu dipake sama banyak hal:
+- IIS (Internet Information Services)
+- Skype
+- VMware
+- Atau aplikasi random yang install service di port itu.
+
+Hasilnya? **Apache nggak mau jalan** sampe lu kill aplikasi yang bentrok atau ubah port ke 8080.
+
+```ini
+# Konfigurasi Apache di xampp\apache\conf\httpd.conf
+Listen 8080
+ServerName localhost:8080
+```
+
+Tapi berubahlah semua URL lu dari `localhost/` jadi `localhost:8080/`. Nggak elegant kan?
+
+### 2. MySQL Connection Hell
+
+Error yang paling sering muncul:
+
+```
+Error: Could not connect to database
+MySQL said: Can't connect to MySQL server on '127.0.0.1' (10061)
+```
+
+Penyebabnya macem-macem:
+- MySQL service nggak jalan
+- Credential salah
+- Socket file ilang
+- Corruption di database files
+
+Gue pribadi pernah ngalamin ini pas XAMPP corrupt pas Windows update. Dataabase ilang. **Bye bye semua data.**
+
+### 3. PHP Version Lock-in
+
+```php
+// Lu butuh PHP 8.2 buat project baru
+// Tapi XAMPP lu install PHP 7.4
+// Upgrade? Download XAMPP baru, migrate semua config...
+```
+
+Setiap mau upgrade PHP, lu harus:
+1. Download XAMPP versi baru
+2. Backup semua config (`php.ini`, `my.ini`)
+3. Uninstall XAMPP lama
+4. Install XAMPP baru
+5. Restore config satu-satu
+6. Hope everything works
+
+Ribet? **Sangat.**
+
+### 4. Nggak Ada Isolation
+
+Semua project share resource yang sama:
+- Satu PHP version
+- Satu MySQL version
+- Satu Apache config
+
+Jadi kalau project A butuh PHP 7.4 dan project B butuh PHP 8.2... **lu harus milih salah satu**. Atau install XAMPP versi lain di folder berbeda, yang eventually jadi mess.
+
+### 5. Production vs Local Environment Mismatch
+
+XAMPP di-set buat development, bukan production. Tapi masalahnya, banyak konfigurasi yang beda jauh sama production server:
+
+```ini
+; php.ini di XAMPP (default)
+display_errors = On
+upload_max_filesize = 2M
+memory_limit = 128M
+```
+
+Pas lu deploy ke server Linux dengan Nginx + PHP-FPM, config-nya beda lagi. Akhirnya lu ketemu bug yang cuma ada di production, nggak di local. **Fun times.**
+
+## Solusinya: Docker
+
+Docker itu ibarat **containerization platform** yang bikin lu bisa jalanin aplikasi dalam "box" yang terisolasi.
+
+Daripada gue jelasin panjang lebar, gue tunjukin dulu bedanya.
+
+### XAMPP vs Docker
+
+| Aspek | XAMPP | Docker |
+|-------|-------|--------|
+| Installation | Klik next-next-finish | Command line / Docker Desktop |
+| Port conflict | Sering bentrok | Tinggal ubah port di docker-compose |
+| PHP version | Locked per install | Beda project, beda container |
+| MySQL version | Satu untuk semua | Beda project, beda container |
+| Isolation | Nggak ada | Full isolation |
+| Team sharing | Share config docs | Share `docker-compose.yml` aja |
+| Cleanup | Uninstall, pray nothing breaks | `docker-compose down -v` |
+| Production parity | Beda | Mirrors production setup |
+
+## Gimana Cara Pakenya?
+
+Oke, gue anggap lu udah install Docker Desktop (untuk Windows/Mac) atau Docker Engine (untuk Linux). Kalo belum, download di [docker.com](https://docker.com) | gratis.
+
+### Struktur Project
+
+Biasanya project PHP/Laravel lu strukturnya kayak gini:
+
+```
+my-laravel-project/
+├── app/
+├── config/
+├── database/
+├── routes/
+├── docker/
+│   ├── nginx/
+│   │   └── default.conf
+│   └── php/
+│       └── Dockerfile
+├── docker-compose.yml
+└── .env
+```
+
+### 1. Buat Dockerfile untuk PHP
+
+```dockerfile
+# docker/php/Dockerfile
+FROM php:8.2-fpm
+
+# Install extensions yang sering dipake
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    libzip-dev \
+    zip \
+    unzip
+
+# Install PHP extensions
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip
+
+# Install Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+EXPOSE 9000
+```
+
+**Kenapa `php:8.2-fpm`?** Karena kita bakal pake Nginx sebagai web server, bukan Apache. Nginx + PHP-FPM combo lebih common di production nowadays.
+
+### 2. Konfigurasi Nginx
+
+```nginx
+# docker/nginx/default.conf
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/html/public;
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
+
+    index index.php index.html;
+
+    charset utf-8;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass app:9000;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+}
+```
+
+**Perhatikan:** `fastcgi_pass app:9000;` | `app` ini adalah service name dari docker-compose yang bakal lu buat. Docker internal network bikin mereka bisa talk ke satu sama lain pake hostname = service name.
+
+### 3. docker-compose.yml | The Magic File
+
+Ini file paling penting. Di sinilah lu definisiin semua services (PHP, MySQL, Nginx, Redis, dll) dalam satu command.
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: laravel_app
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+      - ./docker/php/php.ini:/usr/local/etc/php/conf.ini:ro
+    networks:
+      - laravel
+
+  nginx:
+    image: nginx:alpine
+    container_name: laravel_nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - .:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    networks:
+      - laravel
+
+  mysql:
+    image: mysql:8.0
+    container_name: laravel_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_USER: ${DB_USERNAME}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3307:3306"
+    networks:
+      - laravel
+
+  redis:
+    image: redis:alpine
+    container_name: laravel_redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    networks:
+      - laravel
+
+networks:
+  laravel:
+    driver: bridge
+
+volumes:
+  mysql_data:
+```
+
+### 4. Konfigurasi PHP (Optional)
+
+```ini
+; docker/php/php.ini
+memory_limit = 256M
+upload_max_filesize = 20M
+post_max_size = 20M
+max_execution_time = 300
+display_errors = On
+```
+
+### 5. Update .env
+
+```bash
+# Contoh .env untuk Laravel
+APP_NAME=Laravel
+APP_ENV=local
+APP_KEY=base64:RANDOM_KEY_HERE
+APP_DEBUG=true
+APP_URL=http://localhost:8080
+
+DB_CONNECTION=mysql
+DB_HOST=mysql
+DB_PORT=3306
+DB_DATABASE=laravel_db
+DB_USERNAME=root
+DB_PASSWORD=secret
+
+REDIS_HOST=redis
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+```
+
+**Penting:** `DB_HOST=mysql` | ini hostname dari service MySQL di docker-compose, bukan `localhost`.
+
+## Starting the Stack
+
+Oke, semua config udah siap. Sekarang gimana cara jalanin itu?
+
+### Jalankan Semua Services
+
+```bash
+# Build dan start semua containers
+docker-compose up -d --build
+
+# Lihat status containers
+docker-compose ps
+
+# Lihat logs
+docker-compose logs -f app
+docker-compose logs -f nginx
+```
+
+### Akses Aplikasi
+
+```
+# Aplikasi lu
+http://localhost:8080
+
+# phpMyAdmin (kalo mau manage database via GUI)
+# (tambahin service di docker-compose.yml)
+http://localhost:8081
+```
+
+### Install Dependencies
+
+```bash
+# Install Composer dependencies
+docker-compose exec app composer install
+
+# Generate key (Laravel)
+docker-compose exec app php artisan key:generate
+
+# Run migration
+docker-compose exec app php artisan migrate
+```
+
+### Stop dan Cleanup
+
+```bash
+# Stop containers
+docker-compose down
+
+# Stop dan hapus volumes (data di database kehapus)
+docker-compose down -v
+
+# Stop dan hapus images juga
+docker-compose down --rmi all -v
+```
+
+## Studi Kasus: Migrasi dari XAMPP ke Docker
+
+Gue kasih contoh nyata ya. Misal lu punya project Laravel di XAMPP yang strukturnya kayak gini:
+
+```
+C:\xampp\htdocs\my-project\
+```
+
+Langkah migrasinya:
+
+### Step 1: Backup
+
+```bash
+# Backup database
+mysqldump -u root -p my_database > backup.sql
+
+# Backup .env
+copy my-project\.env my-project\.env.backup
+```
+
+### Step 2: Buat Docker config
+
+1. Buat folder `docker/` di root project
+2. Copy config files yang udah gue kasih di atas
+3. Buat `docker-compose.yml`
+
+### Step 3: Update .env
+
+Ubah `DB_HOST` dari `localhost` jadi `mysql`.
+
+### Step 4: Import data
+
+```bash
+# Copy backup.sql ke container
+docker-compose cp backup.sql mysql:/backup.sql
+
+# Import
+docker-compose exec mysql mysql -u root -p my_database < /backup.sql
+```
+
+### Step 5: Test
+
+```bash
+docker-compose up -d --build
+docker-compose exec app php artisan migrate
+```
+
+**Dan boom** | lu udah jalanin project yang sama di Docker. Nggak ada port conflict, nggak ada MySQL error, dan environment lu sekarang match sama production server.
+
+## Common Issues & Solutions
+
+### "Bind for 0.0.0.0:8080 failed: port is already allocated"
+
+Port 8080 dipake aplikasi lain. Ganti di docker-compose.yml:
+
+```yaml
+ports:
+  - "3000:80"  # Akses di localhost:3000
+```
+
+### "Could not find driver" PHP Error
+
+Extension belum terinstall. Tambahin di Dockerfile:
+
+```dockerfile
+RUN docker-php-ext-install pdo_mysql
+```
+
+Terus rebuild:
+
+```bash
+docker-compose down
+docker-compose up -d --build
+```
+
+### Permission Denied di Storage Folder
+
+Laravel butuh write permission di `storage/`. Tambahin di Dockerfile atau fix setelah container jalan:
+
+```bash
+docker-compose exec app chmod -R 777 storage bootstrap/cache
+```
+
+### Container Out of Memory
+
+Edit Docker Desktop settings:
+- **Windows/Mac**: Docker Desktop > Settings > Resources > Increase Memory to 4GB+
+
+## Tips Pro
+
+### 1. Pakai Docker Compose Named Volumes
+
+```yaml
+volumes:
+  mysql_data:
+    driver: local
+```
+
+Ini lebih baik dari anonymous volumes karena bisa di-manage lebih gampang:
+
+```bash
+# List volumes
+docker volume ls
+
+# Hapus volume yang nggak kepake
+docker volume prune
+```
+
+### 2. Pakai `docker-compose.override.yml`
+
+Buat environment-specific config:
+
+```yaml
+# docker-compose.override.yml (for local development)
+services:
+  app:
+    environment:
+      - XDEBUG_MODE=debug
+    volumes:
+      - ./docker/php/xdebug.ini:/usr/local/etc/php/conf.d/xdebug.ini:ro
+```
+
+`docker-compose.override.yml` auto-merge pas lu jalanin `docker-compose up`. Jadi lu bisa punya config berbeda untuk dev vs production.
+
+### 3. Pakai Makefile
+
+Biar command lebih pendek:
+
+```makefile
+# Makefile
+start:
+	docker-compose up -d --build
+
+stop:
+	docker-compose down
+
+logs:
+	docker-compose logs -f
+
+shell:
+	docker-compose exec app sh
+
+migrate:
+	docker-compose exec app php artisan migrate
+
+fresh:
+	docker-compose exec app php artisan migrate:fresh --seed
+```
+
+Sekarang lu bisa jalanin:
+
+```bash
+make start
+make logs
+make shell
+```
+
+### 4. Pre-commit Hook buat Health Check
+
+```yaml
+# .github/workflows/docker-check.yml
+name: Docker Health Check
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Docker Compose
+        run: docker-compose config --services
+```
+
+## Kapan Tetap Pake XAMPP?
+
+Honestly? **Untuk absolute beginners** yang baru mulai belajar PHP atau MySQL.
+
+XAMPP masih oke kalo:
+- Lu baru belajar 1-2 bulan
+- Project masih localhost-only
+- Nggak perlu collaborate sama orang lain
+- Nggak ada deployment pipeline
+
+Tapi begitu lu masuk ke:
+- Tim development
+- CI/CD pipeline
+- Multiple projects dengan requirements berbeda
+- Production deployment
+
+**Docker bukan lagi "nice to have", tapi mandatory.**
+
+## Kesimpulan
+
+XAMPP itu kayak **sepeda**. Bagus buat mulai, tapi kalau lu mau ke tempat yang lebih jauh, lu butuh yang lebih advanced.
+
+Docker memberikan lu:
+- **Isolation** | setiap project environment-nya sendiri
+- **Reproducibility** | team member lain bisa dapat environment yang sama
+- **Production parity** | apa yang jalan di local, jalan juga di production
+- **Cleanliness** | `docker-compose down` beres semua, nggak nyisa-nyisa
+
+Iya, ada learning curve. Iya, perlu command line. Tapi once lu udah paham docker-compose, lu bakal nanya:
+
+> "Why didn't I switch sooner?"
+
+Lu sekarang siap buat migrate? Atau masih ada pertanyaan soal Docker? Tinggal comment aja bro.
+
+Stay containerized!

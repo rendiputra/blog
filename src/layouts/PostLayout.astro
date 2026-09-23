@@ -2,6 +2,7 @@
 import BaseLayout from "./BaseLayout.astro";
 import TableOfContents from "../components/TableOfContents.astro";
 import SeriesNav from "../components/SeriesNav.astro";
+import ReadingProgress from "../components/ReadingProgress.astro";
 import { Calendar, Tag } from "@lucide/astro";
 
 interface Props {
@@ -32,6 +33,7 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
 ---
 
 <BaseLayout title={`${title} — TechBlog`} description={description}>
+    <ReadingProgress />
     <div class="max-w-6xl mx-auto px-4 py-10">
         <!-- Article Header -->
         <header class="max-w-[65ch] mb-8">
@@ -66,13 +68,18 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
             </div>
         </header>
 
+        <!-- Mobile TOC: Below Header (always show on mobile) -->
+        <div class="lg:hidden mb-6">
+            <TableOfContents headings={headings} />
+        </div>
+
         <!-- Grid Layout: Content + Sidebar -->
         <div
-            class="flex flex-col lg:grid lg:grid-cols-[minmax(0,65ch)_250px] lg:gap-12 items-start"
+            class="flex flex-col lg:grid lg:grid-cols-[minmax(0,65ch)_250px] lg:gap-12"
         >
             <!-- Main Content -->
             <article
-                class="prose dark:prose-invert prose-lg max-w-none
+                class="prose dark:prose-invert prose-lg max-w-none overflow-x-auto
         prose-headings:font-bold prose-headings:tracking-tight prose-headings:text-slate-900 dark:prose-headings:text-slate-100
         prose-p:leading-[1.7] prose-p:text-[1.1rem]
         prose-a:text-sky-400 prose-a:no-underline hover:prose-a:underline
@@ -82,28 +89,38 @@ const formattedDate = pubDate.toLocaleDateString("id-ID", {
         prose-blockquote:border-sky-400/50 prose-blockquote:text-slate-600 dark:prose-blockquote:text-slate-400
         prose-strong:text-slate-900 dark:prose-strong:text-slate-200
         prose-hr:border-slate-200 dark:prose-hr:border-slate-800
+        prose-table:table-fixed
         w-full"
             >
                 <slot />
             </article>
 
-            <!-- Right Sidebar -->
-            <aside
-                class="w-full lg:w-[250px] mt-10 lg:mt-0 lg:sticky lg:top-20 space-y-8"
-            >
-                <TableOfContents headings={headings} />
-                {
-                    series && currentSlug && (
-                        <div class="border-t border-slate-200 dark:border-slate-800 pt-6 transition-colors">
-                            <SeriesNav
-                                seriesName={series}
-                                currentSlug={currentSlug}
-                            />
-                        </div>
-                    )
-                }
+            <!-- Right Sidebar: Desktop Only -->
+            <aside class="hidden lg:block w-[250px] shrink-0">
+                <!-- Combined sticky wrapper for TOC + SeriesNav -->
+                <div class="lg:sticky lg:top-20 lg:max-h-[calc(100vh-5rem)] flex flex-col">
+                    <!-- TOC: scrollable if too long -->
+                    <div class="overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 dark:scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                        <TableOfContents headings={headings} />
+                    </div>
+                    <!-- SeriesNav: always visible at bottom, fixed height -->
+                    {
+                        series && currentSlug && (
+                            <div class="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 shrink-0 bg-white dark:bg-slate-950">
+                                <SeriesNav seriesName={series} currentSlug={currentSlug} />
+                            </div>
+                        )
+                    }
+                </div>
             </aside>
         </div>
+
+        <!-- Mobile SeriesNav: Below article on mobile only -->
+        {series && currentSlug && (
+            <div class="lg:hidden mt-8 pt-6 border-t border-slate-200 dark:border-slate-800">
+                <SeriesNav seriesName={series} currentSlug={currentSlug} />
+            </div>
+        )}
     </div>
 
     <!-- Copy Code Button Script -->

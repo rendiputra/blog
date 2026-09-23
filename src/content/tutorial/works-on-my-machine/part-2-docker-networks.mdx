@@ -1,0 +1,641 @@
+---
+title: "Part 2: Docker Networks: Biar Container Lu Bisa Ngobrol Sesama Sendiri"
+description: "Gue tunjukin gimana Docker network bekerja di belakang layar. Lo bakal paham gimana container ngomong lewat hostname, gimana isolation работает, dan gimana bikin custom network buat arsitektur yang lebih complex."
+pubDate: 2026-07-22
+tags: ["docker", "docker-compose", "tutorial", "devops", "networking", "nodejs", "postgres", "redis"]
+series: "Nyelamatin Diri dari 'Works on My Machine'"
+order: 2
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Di Part 1, lo udah bikin docker-compose.yml yang jalan. API bisa ngobrol sama PostgreSQL. Tapi lo pernah bertanya-tanya:
+
+**"Kok bisa sih container ngobrol cuma pake hostname kayak `postgres`?"**
+
+Atau mungkin lo pernah ngalamin:
+
+```bash
+# Error:
+# Error: getaddrinfo ENOTFOUND postgres
+
+# Lo nanya: "postgres itu hostname dari mana?"
+```
+
+Di part ini, gue bakal reveal gimana Docker network bekerja. Lo bakal paham magia di balik `docker-compose up`, dan gimana bikin network yang lebih advanced.
+
+## Apa Itu Docker Network?
+
+Docker Network itu mekanisme yang bikin container bisa communicate satu sama lain dan dengan dunia luar.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker Host                               │
+│                                                              │
+│   ┌─────────────────────────────────────────────────────┐  │
+│   │           Bridge Network (docker0)                    │  │
+│   │  172.17.0.0/16                                       │  │
+│   │                                                       │  │
+│   │   ┌──────────────┐     ┌──────────────┐             │  │
+│   │   │  Container A │◀───▶│  Container B │             │  │
+│   │   │  172.17.0.2  │     │  172.17.0.3  │             │  │
+│   │   └──────────────┘     └──────────────┘             │  │
+│   │          │                     │                     │  │
+│   └──────────┼─────────────────────┼─────────────────────┘  │
+│              │                     │                         │
+└──────────────┼─────────────────────┼─────────────────────────┘
+               │                     │
+         ┌─────▼─────┐         ┌─────▼─────┐
+         │   Host    │         │ Internet  │
+         │ Network   │         │           │
+         └───────────┘         └───────────┘
+```
+
+Setiap container dapet IP address otomatis dari Docker's internal network. Tapi lo nggak pakai IP | lo pakai **hostname** yang resolved secara otomatis.
+
+## Jenis-Jenis Docker Network
+
+Docker punya beberapa network driver:
+
+### 1. Bridge (Default)
+
+Network default yang dipake kalo lo nggak specify. Container dalam bridge network bisa ngobrol satu sama lain.
+
+```bash
+# Cek bridge network default
+docker network inspect bridge
+
+# Output:
+# {
+#     "Name": "bridge",
+#     "Driver": "bridge",
+#     "Subnet": "172.17.0.0/16",
+#     "Gateway": "172.17.0.1"
+# }
+```
+
+### 2. Host
+
+Container langsung pakai host network. Nggak ada isolasi network.
+
+```bash
+docker run --network host nginx
+# Nginx langsung listen port 80 di host
+```
+
+### 3. Overlay
+
+Untuk Docker Swarm atau multi-host communication.
+
+### 4. Macvlan
+
+Container dapet MAC address sendiri, appear sebagai physical device.
+
+## Docker Compose Networks
+
+Di docker-compose.yml, lo bisa define networks:
+
+```yaml
+version: '3.8'
+
+services:
+  api:
+    networks:
+      - app-network
+    # ...
+
+  postgres:
+    networks:
+      - app-network
+    # ...
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+Ini bikin semua service dalam `app-network` bisa reach satu sama lain pakai service name sebagai hostname.
+
+## Gimana DNS Resolution Bekerja?
+
+Ini bagian magic-nya. Docker kasih built-in DNS server yang resolve service names ke IP addresses.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker DNS (127.0.0.11)                    │
+│                                                              │
+│   Hostname          │  IP Address                            │
+│   ─────────────────────────────────────                      │
+│   postgres          │  172.18.0.2                            │
+│   redis             │  172.18.0.3                            │
+│   api               │  172.18.0.4                            │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Pas container "api" akses "postgres:5432",
+DNS resolver ngerti kalo "postgres" itu container lain
+dan resolve ke IP yang bener.
+```
+
+Lo bisa test ini:
+
+```bash
+# Start container dalam network
+docker-compose up -d
+
+# Cek DNS dari dalam container
+docker-compose exec api nslookup postgres
+
+# Output:
+# Server:    127.0.0.11
+# Address:   127.0.0.11#53
+#
+# Name:      postgres
+# Address:   172.18.0.2
+```
+
+**Boom!** Lo bisa liat `postgres` resolve ke `172.18.0.2`. Docker handles semua otomatis.
+
+## Studi Kasus: Multi-Tier Architecture
+
+Oke, sekarang lo bakal bikin setup yang lebih complex:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    app-network                                │
+│                                                              │
+│   ┌──────────────┐                                          │
+│   │     API      │                                          │
+│   │  (Node.js)  │                                          │
+│   └──────┬───────┘                                          │
+│          │                                                  │
+│   ┌──────▼───────┐     ┌──────────────┐                     │
+│   │    Redis     │◀───▶│  PostgreSQL  │                     │
+│   │  (Cache)     │     │   (DB)       │                     │
+│   └──────────────┘     └──────────────┘                     │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    backend-network                           │
+│                                                              │
+│   ┌──────────────┐     ┌──────────────┐                     │
+│   │   Worker     │───▶│  PostgreSQL  │                     │
+│   │  (Background│     │   (DB)       │                     │
+│   └──────────────┘     └──────────────┘                     │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Lo pengen:
+- API dan Redis + PostgreSQL satu network
+- Worker dan PostgreSQL satu network
+- Worker GAK BISA akses API langsung (isolation)
+
+Ini demonstrate network isolation:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  api:
+    build: ./api
+    container_name: api
+    ports:
+      - "3000:3000"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  worker:
+    build: ./worker
+    container_name: worker
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend-network
+      - app-network  # Worker butuh akses ke Redis juga
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_DB=myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d myapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+      - backend-network  # PostgreSQL di kedua network
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+  backend-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+```
+
+**Isolation diagram:**
+
+```
+app-network:
+| API ◀──────▶ Redis
+| API ◀──────▶ PostgreSQL
+
+backend-network:
+| Worker ◀──▶ PostgreSQL
+```
+
+**Yang terjadi:**
+- API GAK BISA akses Worker (beda network)
+- Worker GAK BISA akses API (beda network)
+- API dan Worker SAMA-SAMA bisa akses PostgreSQL dan Redis
+
+## External Network (Connect ke Existing Networks)
+
+Lo bisa connect container ke network yang udah ada:
+
+```yaml
+# Connect ke network yang di-create manual
+networks:
+  default:
+    external: true
+    name: my-existing-network
+```
+
+Atau create external network dari compose:
+
+```bash
+# Create network dulu
+docker network create my-network
+
+# Gunakan di compose
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+## Service Discovery
+
+Docker punya built-in service discovery. Ini artinya lo bisa pakai service name dan Docker automagically resolve ke IP.
+
+### Contoh: Multiple Replicas
+
+```yaml
+# Scale API ke 3 instances
+services:
+  api:
+    build: ./api
+    networks:
+      - app-network
+    deploy:
+      replicas: 3
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+**Tanpa load balancer manual:**
+- Semua 3 containers punya nama "api"
+- Service discovery ngarahin semua requests ke semua 3 IPs
+- Load distribute automatically
+
+**Tapi wait...** kalo ada 3 "api" containers, service discovery bakal resolve ke mana?
+
+```bash
+docker network inspect app-network
+
+#会发现:
+# api_1, api_2, api_3 semua ada di network
+# DNS query "api" bakal return semua IPs
+```
+
+### DNS Round Robin
+
+Docker DNS automatically distribute requests:
+
+```bash
+# Dari container "redis"
+nslookup api
+
+# Server:    127.0.0.11
+# Name:      api
+# Address:   172.18.0.2    # api_1
+# Address:   172.18.0.3    # api_2
+# Address:   172.18.0.4    # api_3
+
+# Setiap query dapet round-robin IP
+```
+
+## Network Aliases
+
+Lo bisa kasih hostname lain ke container:
+
+```yaml
+services:
+  postgres:
+    networks:
+      app-network:
+        aliases:
+          - database
+          - primary-db
+```
+
+Sekarang `postgres`, `database`, dan `primary-db` semua resolve ke IP yang sama:
+
+```bash
+# Semua ini works:
+psql -h postgres
+psql -h database
+psql -h primary-db
+```
+
+## Port vs networks:host
+
+Ini yang sering bikin bingung:
+
+```yaml
+services:
+  api:
+    ports:
+      - "3000:3000"  # Host:Container
+
+  postgres:
+    # Nggak ada ports!
+    networks:
+      - app-network
+```
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Host Machine                            │
+│                                                              │
+│   ┌──────────────┐                                          │
+│   │  Port 3000   │◀─── External access (browser, curl)     │
+│   └──────┬───────┘                                          │
+│          │                                                  │
+└──────────┼──────────────────────────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────┐
+│                    app-network                               │
+│                                                              │
+│   ┌──────────────┐                                          │
+│   │     API      │─── port 3000                             │
+│   │  (Container) │                                          │
+│   └──────────────┘                                          │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Host port 3000 ───▶ Container port 3000
+HTTP dari luar ──▶ API container
+```
+
+**Tanpa `ports`:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Host Machine                            │
+│                                                              │
+│   ┌──────────────┐                                          │
+│   │  PostgreSQL  │─── port 5432 (INTERNAL ONLY)           │
+│   │  (Container) │                                          │
+│   └──────────────┘                                          │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+Hanya container dalam network app-network yang bisa akses PostgreSQL.
+Dunia luar GAK BISA akses.
+```
+
+Ini security feature! Database lu nggak exposed ke internet.
+
+## Advanced: IPv6 Support
+
+Docker juga support IPv6:
+
+```bash
+# Enable IPv6 di Docker daemon
+# /etc/docker/daemon.json
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "2001:db8:1::/64"
+}
+
+# Restart Docker
+sudo systemctl restart docker
+```
+
+```yaml
+services:
+  api:
+    ipv6_address: 2001:db8:1::2
+    networks:
+      app-network:
+        ipv6_address: 2001:db8:1::2
+```
+
+## Network Troubleshooting
+
+### Cek Network Info
+
+```bash
+# List semua networks
+docker network ls
+
+# Inspect specific network
+docker network inspect app-network
+
+# Lihat container dalam network
+docker network inspect app-network --format '{{range .Containers}}{{.Name}} {{end}}'
+```
+
+### Test Connectivity
+
+```bash
+# Ping dari container ke container lain
+docker-compose exec api ping postgres
+
+# Output:
+# PING postgres (172.18.0.2) 56(84) bytes of data.
+# 64 bytes from postgres (172.18.0.2): icmp_seq=1 ttl=64 time=0.123 ms
+
+# DNS lookup
+docker-compose exec api nslookup postgres
+
+# Port check
+docker-compose exec api nc -zv postgres 5432
+```
+
+### Common Issues
+
+**Issue 1: DNS Resolution Failed**
+
+```bash
+# Error:
+# Error: getaddrinfo ENOTFOUND myservice
+
+# Penyebab:
+# Container nggak ada dalam network yang sama
+
+# Solusi:
+networks:
+  - app-network  # Pastikan service ada di network yang sama
+```
+
+**Issue 2: Connection Refused**
+
+```bash
+# Error:
+# Error: ECONNREFUSED 172.18.0.2:5432
+
+# Penyebab:
+# Target container belum ready (startup order)
+
+# Solusi:
+# Pakai healthcheck + depends_on condition
+```
+
+**Issue 3: Port Conflict**
+
+```bash
+# Error:
+# Bind for 0.0.0.0:5432 failed: port is already allocated
+
+# Penyebab:
+# Port udah dipake service lain atau host
+
+# Solusi:
+# Ganti port di compose:
+ports:
+  - "5433:5432"  # Host 5433, container 5432
+```
+
+## Security Best Practices
+
+### 1. Jangan Expose Database Ports
+
+```yaml
+# ❌ BAD: Database ke-expose ke internet
+services:
+  postgres:
+    ports:
+      - "5432:5432"  # PUBLIC ACCESS!
+
+# ✅ GOOD: Database internal only
+services:
+  postgres:
+    # Nggak ada ports!
+    networks:
+      - app-network  # Only accessible dari app-network
+```
+
+### 2. Use Specific Network Drivers
+
+```yaml
+# ❌ BAD: Default bridge (legacy)
+networks:
+  default:
+    driver: bridge
+
+# ✅ GOOD: Named networks dengan driver explicit
+networks:
+  app-network:
+    driver: bridge
+  backend-network:
+    driver: bridge
+```
+
+### 3. Isolate by Function
+
+```yaml
+# Frontend network (public)
+# Backend network (internal)
+# Database network (restricted)
+```
+
+## Kesimpulan
+
+Lo udah belajar gimana Docker network bekerja:
+
+**Network Fundamentals:**
+- Bridge network driver
+- DNS resolution (service name ke IP)
+- Network isolation
+
+**Docker Compose Networks:**
+- Define networks di compose file
+- Connect containers ke multiple networks
+- Service isolation
+
+**Advanced Concepts:**
+- Network aliases
+- Service discovery
+- DNS round robin
+- External networks
+
+**Troubleshooting:**
+- Inspect networks
+- Test connectivity (ping, nslookup, nc)
+- Common issues dan solutions
+
+**Security:**
+- Jangan expose yang nggak perlu
+- Use explicit network drivers
+- Isolate by function
+
+**Key takeaways:**
+
+```
+Docker network itu like magic DNS server:
+| Container "postgres" = IP otomatis
+| Container "redis" = IP otomatis
+| Lo nggak perlu tau IP | Docker handles semua
+
+Network isolation = security:
+| Database dalam network terpisah
+| Worker dalam network terpisah
+| Gak bisa sembarangan ngobrol
+
+Docker Compose simplifies everything:
+| Satu file buat define semua
+| Network auto-created
+| Service discovery auto-enabled
+```
+
+Di Part 1 dan Part 2 ini, lo udah punya fondasi yang kuat buat Docker Compose. Lo bisa bikin multi-container setup dengan network isolation, health checks, dan best practices.
+
+**Next step:** Coba bikin setup sendiri dengan Redis, PostgreSQL, dan mungkin Nginx sebagai reverse proxy. Practice makes perfect!
+
+Kalo ada pertanyaan atau mau gue jelasin bagian tertentu lebih detail, comment aja bro.
+
+Stay networked!
+
+---
+
+*Previous: [Part 1] Docker Compose Setup*

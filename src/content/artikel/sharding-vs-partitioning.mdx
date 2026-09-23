@@ -1,0 +1,720 @@
+---
+title: "Database Lu Makin Gendut? Pahami Beda Sharding vs Partitioning Biar Nggak Salah Obat"
+description: "Banyak yang ketuker antara sharding dan partitioning. Gue bakal jelasin dengan analogi lemari buku. Partitioning itu mecah tabel gede jadi tabel kecil tapi masih di satu server. Sharding itu mecah data ke beberapa server berbeda. Pembaca bakal tau kapan harus pake yang mana."
+pubDate: 2026-09-01
+tags: ["database", "sharding", "partitioning", "scalability", "performance", "postgresql", "mysql", "architecture"]
+coverImage: "https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1200&h=630&fit=crop"
+---
+
+Oke, skenario yang familiar.
+
+Aplikasi e-commerce lu mulai grow. Database lo makin gendut.
+
+```
+6 bulan lalu:
+Database size: 500MB
+Total rows: 10,000
+Query time: 50ms
+
+Sekarang:
+Database size: 50GB
+Total rows: 5,000,000
+Query time: 2000ms
+```
+
+Lo coba optimisasi:
+- Add index | Done
+- Optimize query | Done
+- Increase server RAM | Done
+
+Tapi tetep lemot. Query time masih 1500ms.
+
+Lo nanya ke senior:
+
+```
+Lo: "Bang, database gue lemot padahal udah di-optimize. Apa solusinya?"
+
+Senior: "Partitioning aja."
+
+Lo: "Oh oke, partitioning. Terus kalo partitioning belum cukup?"
+
+Senior: "Ya sharding."
+
+Lo: "...apa bedanya?"
+
+Senior: "Ya... satu itu partition, satu lagi shard."
+
+Lo: "..."
+```
+
+Sound familiar?
+
+Banyak developer yang ketuker antara partitioning dan sharding. Dua-duanya solusi buat handle data yang gede, tapi cara kerja dan use case-nya beda. Salah pilih = waktu dan resources terbuang.
+
+Di artikel ini, gue bakal jelasin dengan analogi lemari buku biar lo ngerti kapan harus pake yang mana.
+
+Let's go!
+
+## Analogi: Lemari Buku
+
+Oke, lo punya lemari buku.
+
+### Awalnya, Lemari Kecil
+
+```
+┌─────────────────────────────────────┐
+│                 Lemari Buku                    │
+│                                         │
+│   📚 📚 📚 📚 📚 📚 📚 📚          │
+│   📚 📚 📚 📚 📚 📚 📚 📚          │
+│   📚 📚 📚 📚 📚 📚 📚 📚          │
+│                                         │
+│   Isi: 100 buku                      │
+│   Bisa cari buku dalam 1 menit        │
+│   ✅ Semua masuk                     │
+│                                         │
+└─────────────────────────────────────┘
+```
+
+Semua buku lo simpen dalam satu lemari. Pencarian cepat karena lemari masih kecil.
+
+### Bertambah Buku
+
+```
+┌─────────────────────────────────────┐
+│                 Lemari Buku                    │
+│                                         │
+│   📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚
+│   📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚
+│   📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚
+│   📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚
+│   📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚 📚
+│                                         │
+│   Isi: 1000 buku                      │
+│   Cari buku: 10 menit                 │
+│   Lemari penuh!                       │
+│                                         │
+└─────────────────────────────────────┘
+```
+
+Lemari penuh. Lo mulai ribet nyari buku.
+
+## Solusi 1: Partisi Lemari (Partitioning)
+
+Lo mecah lemari jadi beberapa bagian, tapi **masih dalam satu lemari yang sama**.
+
+```
+┌─────────────────────────────────────────────┐
+│                  Lemari Terpartisi                 │
+│                                                   │
+│  ┌─────────────┐ ┌─────────────┐ ┌──────────┐ │
+│  │ A-E (Fiksi) │ │ F-L (Nonfik)│ │ M-Z     │ │
+│  │ 📚 📚 📚 📚 │ │ 📚 📚 📚 📚 │ │ 📚 📚   │ │
+│  │ 📚 📚 📚 📚 │ │ 📚 📚 📚 📚 │ │ 📚 📚   │ │
+│  └─────────────┘ └─────────────┘ └──────────┘ │
+│                                                   │
+│  Tipe: Fiksi | Nonfiksi | Lainnya              │
+│                                                   │
+│  Isi: 1000 buku                                 │
+│  Cari: 3 menit (cari di bagian yang bener)      │
+│  ✅ Satu lemari | organize                    │
+│                                                   │
+└─────────────────────────────────────────────┘
+```
+
+**Karakteristik:**
+- Semua bagian masih dalam satu lemari
+- Lo masih harus nyari dalam lemari yang sama
+- Tapi lebih cepat karena data udah di-organize
+
+## Solusi 2: Sharding (Shard Lemari)
+
+Lo punya **multiple lemari di ruangan berbeda**.
+
+```
+┌─────────────────────────────────────────────────┐
+│                    Sharded Book Collection                │
+│                                                       │
+│  Lemari 1 (A-M)          Lemari 2 (N-Z)            │
+│  ┌─────────────────┐     ┌─────────────────┐       │
+│  │ 📚📚📚📚📚📚📚📚 │     │ 📚📚📚📚📚📚📚📚 │       │
+│  │ 📚📚📚📚📚📚📚📚 │     │ 📚📚📚📚📚📚📚📚 │       │
+│  │ 📚📚📚📚        │     │ 📚📚📚📚        │       │
+│  └─────────────────┘     └─────────────────┘       │
+│  Lokasi: Rak kiri         Lokasi: Rak kanan        │
+│                                                       │
+│  Isi: 1000 buku (500+500)                          │
+│  Cari: 1.5 menit (cari di lemari yang tepat)       │
+│  ✅ Multiple servers | massive scale                 │
+│                                                       │
+└─────────────────────────────────────────────────┘
+```
+
+**Karakteristik:**
+- Data tersebar di multiple lemari (servers)
+- Lo harus tau buku ada di lemari yang mana
+- Bisa scale horizontal tanpa batas teoritis
+
+## Apa Itu Database Partitioning?
+
+Partitioning itu **mecah tabel besar jadi partisi-partisi kecil**, tapi masih dalam **satu database server yang sama**.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Database Server (Single)                    │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐   │
+│  │               Table: orders                            │   │
+│  │                                                       │   │
+│  │  Partition: orders_2024_q1  │ orders_2024_q2       │   │
+│  │  ┌──────────────────────┐ │ ┌───────────────────┐ │   │
+│  │  │ Jan | Feb | Mar     │ │ │ Apr | May | Jun   │ │   │
+│  │  │ 10K rows           │ │ │ 12K rows         │ │   │
+│  │  └──────────────────────┘ │ └───────────────────┘ │   │
+│  │                                                       │   │
+│  │  Partition: orders_2024_q3  │ orders_2024_q4       │   │
+│  │  ┌──────────────────────┐ │ ┌───────────────────┐ │   │
+│  │  │ Jul | Aug | Sep     │ │ │ Oct | Nov | Dec   │ │   │
+│  │  │ 11K rows           │ │ │ 15K rows         │ │   │
+│  │  └──────────────────────┘ │ └───────────────────┘ │   │
+│  └────────────────────────────────────────────────────┘   │
+│                                                              │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- Query yang spesifik ke partisi tertentu lebih cepat
+- Maintenance (backup, rebuild index) bisa per partisi
+- Data lama bisa di-archive tanpa pengaruh ke data baru
+- Single server | simpler operations
+
+## Jenis-Jenis Partitioning
+
+### 1. Range Partitioning
+
+Mecah data berdasarkan range nilai.
+
+```sql
+-- PostgreSQL: Range partition by date
+CREATE TABLE orders (
+    id SERIAL,
+    order_date DATE NOT NULL,
+    customer_id INT,
+    total DECIMAL(10,2)
+) PARTITION BY RANGE (order_date);
+
+-- Partisi per quarter
+CREATE TABLE orders_2024_q1 PARTITION OF orders
+    FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+
+CREATE TABLE orders_2024_q2 PARTITION OF orders
+    FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+
+CREATE TABLE orders_2024_q3 PARTITION OF orders
+    FOR VALUES FROM ('2024-07-01') TO ('2024-10-01');
+
+CREATE TABLE orders_2024_q4 PARTITION OF orders
+    FOR VALUES FROM ('2024-10-01') TO ('2025-01-01');
+```
+
+```sql
+-- Query jadi otomatis ke-partisi yang bener
+SELECT * FROM orders
+WHERE order_date BETWEEN '2024-04-01' AND '2024-06-30';
+
+-- Database automatically routes to orders_2024_q2
+-- Faster because it only scans that partition
+```
+
+### 2. List Partitioning
+
+Mecah data berdasarkan list nilai spesifik.
+
+```sql
+-- PostgreSQL: Partition by region
+CREATE TABLE customers (
+    id SERIAL,
+    name VARCHAR(100),
+    region VARCHAR(50)
+) PARTITION BY LIST (region);
+
+CREATE TABLE customers_asia PARTITION OF customers
+    FOR VALUES IN ('Indonesia', 'Singapore', 'Malaysia', 'Thailand');
+
+CREATE TABLE customers_europe PARTITION OF customers
+    FOR VALUES IN ('Germany', 'France', 'UK', 'Spain');
+
+CREATE TABLE customers_america PARTITION OF customers
+    FOR VALUES IN ('USA', 'Canada', 'Brazil', 'Mexico');
+
+CREATE TABLE customers_other PARTITION OF customers
+    FOR VALUES IN (DEFAULT);  -- Semua region lain
+```
+
+### 3. Hash Partitioning
+
+Mecah data berdasarkan hash value.
+
+```sql
+-- PostgreSQL: Hash partition
+CREATE TABLE events (
+    id SERIAL,
+    user_id INT,
+    event_type VARCHAR(50),
+    created_at TIMESTAMP
+) PARTITION BY HASH (user_id);
+
+-- 4 partitions
+CREATE TABLE events_p0 PARTITION OF events
+    FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+
+CREATE TABLE events_p1 PARTITION OF events
+    FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+
+CREATE TABLE events_p2 PARTITION OF events
+    FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+
+CREATE TABLE events_p3 PARTITION OF events
+    FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+```
+
+### 4. Composite Partitioning
+
+Kombinasi dari beberapa tipe.
+
+```sql
+-- PostgreSQL: Range + Hash
+CREATE TABLE logs (
+    id SERIAL,
+    log_date DATE,
+    user_id INT,
+    action VARCHAR(100)
+) PARTITION BY RANGE (log_date);
+
+-- Partisi per year, masing-masing di-hash
+CREATE TABLE logs_2024 PARTITION OF logs
+    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+    PARTITION BY HASH (user_id);
+```
+
+## Apa Itu Sharding?
+
+Sharding itu **mecah data dan distribusi ke multiple database servers** (shards), dimana setiap shard adalah **database server yang independent**.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Sharded Architecture                             │
+│                                                              │
+│   Application Layer                                            │
+│         │                                                       │
+│    ┌────┴────┐                                               │
+│    │         │                                                 │
+│    ▼         ▼                                                 │
+│ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐              │
+│ │ Shard  │ │ Shard  │ │ Shard  │ │ Shard  │              │
+│ │   1    │ │   2    │ │   3    │ │   4    │              │
+│ │        │ │        │ │        │ │        │              │
+│ │ User   │ │ User   │ │ User   │ │ User   │              │
+│ │  1-25% │ │ 26-50% │ │51-75% │ │76-100% │              │
+│ │        │ │        │ │        │ │        │              │
+│ │ own DB │ │ own DB │ │ own DB │ │ own DB │              │
+│ └────────┘ └────────┘ └────────┘ └────────┘              │
+│                                                              │
+│   Shard Key: user_id                                          │
+│   - user_id 1-2500 → Shard 1                                 │
+│   - user_id 2501-5000 → Shard 2                              │
+│   - user_id 5001-7500 → Shard 3                              │
+│   - user_id 7501-10000 → Shard 4                             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- Scale horizontal tanpa batas teoritis
+- Setiap shard bisa di-optimize independently
+- Failure isolated | satu shard down nggak ngaruh ke shard lain
+- Different shards bisa di different locations (geo-distribution)
+
+## Sharding Strategies
+
+### 1. Key-Based Sharding (Hash Sharding)
+
+```javascript
+// Shard selection based on hash
+function getShard(userId) {
+  const shardCount = 4;
+  const shardIndex = userId % shardCount;
+  return `shard_${shardIndex}`;
+}
+
+// Example:
+// userId = 123 → 123 % 4 = 3 → Shard 3
+// userId = 456 → 456 % 4 = 0 → Shard 0
+// userId = 789 → 789 % 4 = 1 → Shard 1
+```
+
+```sql
+-- PostgreSQL with Citus extension (sharding)
+-- Citus handles shard distribution automatically
+
+CREATE TABLE users (
+    user_id BIGINT PRIMARY KEY,
+    name TEXT,
+    email TEXT
+);
+
+SELECT create_distributed_table('users', 'user_id');
+
+-- Citus automatically:
+-- 1. Creates 4 shards (based on citus.shard_count)
+-- 2. Distributes based on user_id hash
+-- 3. Routes queries automatically
+```
+
+### 2. Range-Based Sharding
+
+```javascript
+// Shard based on range
+function getShard(userId) {
+  if (userId < 2500) return 'shard_0';
+  if (userId < 5000) return 'shard_1';
+  if (userId < 7500) return 'shard_2';
+  return 'shard_3';
+}
+```
+
+### 3. Directory-Based Sharding
+
+```javascript
+// Lookup table untuk shard mapping
+const shardDirectory = {
+  'user_123': 'shard_0',
+  'user_456': 'shard_1',
+  'user_789': 'shard_2',
+};
+
+function getShard(userId) {
+  return shardDirectory[`user_${userId}`];
+}
+```
+
+## Partitioning vs Sharding: Perbandingan Langsung
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Partitioning vs Sharding                          │
+│                                                              │
+│   ┌─────────────────┐      ┌─────────────────┐              │
+│   │   Partitioning  │      │     Sharding     │              │
+│   └─────────────────┘      └─────────────────┘              │
+│                                                              │
+│   Scope: Single Server                                         │
+│   │                    │      Scope: Multiple Servers         │
+│   │                    │                                   │
+│   │  ┌──────────┐   │      │  ┌────────┐ ┌────────┐   │
+│   │  │ Partisi  │   │      │  │ Shard  │ │ Shard  │   │
+│   │  │    A     │   │      │  │    1   │ │    2   │   │
+│   │  └──────────┘   │      │  └────────┘ └────────┘   │
+│   │  ┌──────────┐   │      │  ┌────────┐ ┌────────┐   │
+│   │  │ Partisi  │   │      │  │ Shard  │ │ Shard  │   │
+│   │  │    B     │   │      │  │    3   │ │    4   │   │
+│   │  └──────────┘   │      │  └────────┘ └────────┘   │
+│   │                   │      │                               │
+│   │  Same Database   │      │  Different Databases        │
+│   │  Same Server     │      │  Different Servers          │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Aspek | Partitioning | Sharding |
+|-------|-------------|----------|
+| **Scope** | Single server | Multiple servers |
+| **Storage** | Same database | Different databases |
+| **Query Routing** | Automatic | Manual/custom |
+| **Complexity** | Lower | Higher |
+| **Cost** | Single server | Multiple servers |
+| **Scaling** | Vertical | Horizontal |
+| **Failure Impact** | Server down = all partitions down | One shard down = partial data unavailable |
+| **Cross-Partition Queries** | Supported (but slower) | Limited/difficult |
+
+## Kapan Pake Partitioning?
+
+Partitioning cocok kalo:
+
+### 1. Lo butuh organize data yang besar dalam satu server
+
+```
+✅ Partitioning Use Cases:
+| - Tabel dengan millions rows
+| - Range queries yang predictable (date-based)
+| - Data archival (old data jarang diakses)
+| - Maintenance yang lebih gampang
+| - Table yang sering di-full table scan tapi ada filter
+```
+
+### 2. Contoh Real-World
+
+```sql
+-- E-commerce: Orders table
+-- 10 juta orders dalam 5 tahun
+
+CREATE TABLE orders (
+    id BIGSERIAL,
+    order_date DATE NOT NULL,
+    customer_id BIGINT,
+    total DECIMAL(10,2),
+    status VARCHAR(20)
+) PARTITION BY RANGE (order_date);
+
+-- Partisi per tahun
+CREATE TABLE orders_2020 PARTITION OF orders
+    FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
+
+CREATE TABLE orders_2021 PARTITION OF orders
+    FOR VALUES FROM ('2021-01-01') TO ('2022-01-01');
+
+CREATE TABLE orders_2022 PARTITION OF orders
+    FOR VALUES FROM ('2022-01-01') TO ('2023-01-01');
+
+CREATE TABLE orders_2023 PARTITION OF orders
+    FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
+
+CREATE TABLE orders_2024 PARTITION OF orders
+    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+-- Query untuk Q1 2024
+SELECT * FROM orders
+WHERE order_date BETWEEN '2024-01-01' AND '2024-03-31'
+AND customer_id = 123;
+
+-- Database automatically:
+-- 1. Routes to orders_2024 partition
+-- 2. Scans only that partition
+-- 3. Much faster than scanning 10M rows
+```
+
+### 3. Kapan Partitioning Nggak Cukup
+
+```
+❌ Partitioning limitations:
+| - Server resource (CPU, RAM, disk) udah maxed out
+| - Latency ainda tinggi malgré partitioning
+| - Need geo-distribution
+| - Need different data retention policies per shard
+| - Critical requirement: partial availability
+```
+
+## Kapan Pake Sharding?
+
+Sharding cocok kalo:
+
+### 1. Lo butuh scale horizontal
+
+```
+✅ Sharding Use Cases:
+| - Data yang terus grow tanpa batas
+| - Server resource udah maxed out malgré optimization
+| - Need geo-distribution
+| - Multi-tenant dengan data isolation
+| - Different retention policies per tenant
+```
+
+### 2. Contoh Real-World
+
+```sql
+-- Multi-tenant SaaS application
+-- Setiap tenant perlu isolated data
+
+-- Shard by tenant_id
+-- Tenant A → Shard 1 (Singapore)
+-- Tenant B → Shard 2 (US East)
+-- Tenant C → Shard 3 (Europe)
+
+-- Query execution:
+-- 1. Lookup tenant's shard location
+-- 2. Route query to that shard
+-- 3. Return results
+```
+
+### 3. Kapan Sharding Overkill
+
+```
+❌ Sharding overkill:
+| - Data < 1 juta rows
+| - Single server masih cukup powerful
+| - Team nggak punya expertise
+| - Query patterns sering cross-shard
+| - Simpler solutions belum dicoba (partitioning, caching, indexing)
+```
+
+## Common Mistakes
+
+### 1. Sharding Terlalu Dini
+
+```
+❌ BAD: Sharding from day 1 dengan 1000 users
+
+Reality:
+| - Complexity increases 10x
+| - Cross-shard queries jadi nightmare
+| - Operational overhead huge
+| - belum ada masalah performa pun sudah di-shard
+
+✅ GOOD: Optimize first, shard when needed
+| 1. Indexing ✓
+| 2. Query optimization ✓
+| 3. Caching ✓
+| 4. Read replicas ✓
+| 5. Partitioning ✓
+| 6. SHARDING (when all above exhausted)
+```
+
+### 2. Salah Pilih Shard Key
+
+```
+❌ BAD: Shard by timestamp
+
+Problem:
+| - All recent data di satu shard
+| - Hot shard = bottleneck
+| - Old shards mostly idle
+
+user_id 1000: Shard_2024_01
+user_id 1000: Shard_2024_01  -- Same user, different shard!
+Query for user 1000's history: Must query all shards!
+
+✅ GOOD: Shard by user_id atau tenant_id
+
+user_id 1000 → Shard_3
+user_id 1001 → Shard_3
+
+-- All user's data di shard yang sama
+-- Query user's complete history: Single shard
+```
+
+### 3. Cross-Shard Queries
+
+```
+❌ BAD: Sering query yang ngarahin multi-shard
+
+Example:
+SELECT * FROM orders o
+JOIN customers c ON o.customer_id = c.id
+WHERE c.region = 'Asia'
+
+Problem:
+-- Orders dan customers mungkin di shard berbeda
+-- Query harus ke semua shard
+-- Hasil di-merge di application layer
+-- Performance: SLOW
+
+✅ GOOD: Design schema with shard key in mind
+
+-- Jika shard by customer_id:
+-- Include denormalized customer data in orders
+-- Atau use consistent lookups
+```
+
+## Tools untuk Partitioning dan Sharding
+
+### Partitioning Tools (Built-in)
+
+```
+PostgreSQL: Native partitioning ✓
+MySQL: Native partitioning ✓
+Oracle: Native partitioning ✓
+SQL Server: Table partitioning ✓
+```
+
+### Sharding Tools
+
+```
+Citus (PostgreSQL): Extension untuk sharding
+| - Horizontal scaling for PostgreSQL
+| - Distributed tables
+| - Automatic query routing
+| - Single-node feel with multi-node scale
+
+Vitess (MySQL): YouTube's sharding solution
+| - Horizontal scaling for MySQL
+| - Used in production at scale
+| - Connection pooling
+| - Schema migrations
+
+MongoDB: Native sharding
+| - Automatic shard balancing
+| - Range and hash sharding
+| - Built-in
+
+PlanetScale (MySQL): Serverless sharding
+| - Branching like Git
+| - Auto-scaling
+| - MySQL compatible
+```
+
+## Decision Framework
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Should I Partition or Shard?                   │
+│                                                              │
+│   Current situation:                                         │
+│   │                                                          │
+│   ├─ Data < 1 juta rows?                                     │
+│   │   └─ NO ────▶ Consider partitioning                      │
+│   │                                                          │
+│   ├─ Single server still powerful enough?                     │
+│   │   └─ NO ────▶ Need sharding                             │
+│   │                                                          │
+│   ├─ Range queries are slow?                                 │
+│   │   └─ YES ───▶ Partitioning (by range)                    │
+│   │                                                          │
+│   ├─ Need geo-distribution?                                  │
+│   │   └─ YES ───▶ Sharding (by region)                       │
+│   │                                                          │
+│   └─ Already optimized (index, query, cache)?                │
+│       └─ NO ────▶ Optimize first                            │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Kesimpulan
+
+Lo udah paham bedanya partitioning dan sharding:
+
+**Partitioning:**
+- Mecah tabel dalam satu server
+- Data masih dalam database yang sama
+- Query routing automatic
+- simpler operations
+- Cocok buat: organize data, speed up range queries, maintenance lebih gampang
+
+**Sharding:**
+- Mecah data ke multiple servers
+- Setiap shard adalah database independent
+- Query routing manual/custom
+- More complex, higher overhead
+- Cocok buat: massive scale, horizontal scaling, geo-distribution
+
+**The Takeaway:**
+
+```
+Before sharding:
+| 1. ✅ Index optimization
+| 2. ✅ Query optimization
+| 3. ✅ Caching layer
+| 4. ✅ Read replicas
+| 5. ✅ Partitioning
+| 6. ❌ SHARDING (only if all above exhausted)
+```
+
+**Common mistake:**
+- Jumping ke sharding terlalu dini
+- Sharding itu last resort, bukan first solution
+- Partitioning dulu | biasanya udah cukup buat majority of cases
+
+Lo sekarang udah tau kapan harus pake partitioning dan kapan harus pake sharding. Mulai dari yang simpler dulu, scale up when needed.
+
+Kalo ada pertanyaan atau mau gue jelasin bagian tertentu lebih detail, comment aja bro.
+
+Stay scale!

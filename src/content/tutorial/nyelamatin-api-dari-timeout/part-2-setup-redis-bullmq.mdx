@@ -1,0 +1,600 @@
+---
+title: "Part 2: Setup Redis dan BullMQ | Bikin Queue System dalam 10 Menit"
+description: "Tutorial step-by-step setup Redis dan BullMQ buat bikin job queue system. Nggak perlu install Redis di local? No problem, pake Upstash Redis yang free tier-nya cukup buat development dan side projects."
+pubDate: 2026-08-08
+tags: ["tutorial", "message-broker", "backend", "nodejs", "background-jobs", "redis", "bullmq"]
+series: "Nyelamatin API dari Timeout"
+order: 2
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Di Part 1, lo udah paham kenapa lo butuh background jobs dan kapan harus pake.
+
+Sekarang, gimana cara implementasinya?
+
+Di part ini, gue bakal tunjukin cara setup **Redis** dan **BullMQ** | dua tools yang bakal jadi backbone queue system lu.
+
+## Apa Itu Redis?
+
+Redis itu **in-memory data store** yang super cepat. Biasa dipake buat:
+- Cache
+- Session storage
+- Message broker (ini yang kita butuhin)
+- Real-time data
+
+```
+Redis vs Database:
+
+Database (PostgreSQL):
+| Data: Persistent (disk)
+| Speed: 1-10ms per operation
+| Use: Primary data storage
+
+Redis:
+| Data: In-memory (RAM)
+| Speed: 0.1-1ms per operation
+| Use: Cache, queues, real-time
+```
+
+Kenapa Redis buat queue? Karena **kecepatan**. Queue operations harus secepat mungkin. Redis bisa handle hundreds of thousands operations per second.
+
+## Apa Itu BullMQ?
+
+BullMQ itu **job queue library** buat Node.js yang built on top of Redis. Ini abstraction layer yang bikin kerja dengan queues jadi gampang.
+
+```
+Tanpa BullMQ:
+| Lo harus implementasi queue logic sendiri
+| Handle retry manually
+| Manage job state (waiting, active, completed, failed)
+| Redis commands langsung
+
+Dengan BullMQ:
+| const job = await myQueue.add('task', data);
+| BullMQ handle semua complexity
+| Built-in retry, priority, concurrency
+| Clean API
+```
+
+## Setup Options
+
+Lo punya 2 opsi:
+
+### Opsi 1: Redis Cloud (Recommended for Development)
+
+Kalo lo nggak mau install Redis di local, pake **Upstash** | Redis-compatible service dengan free tier yang generous.
+
+```
+Upstash Free Tier:
+| 10,000 commands per day
+| 256MB storage
+| 30 concurrent connections
+| 1 database
+
+Perfect untuk:
+| Development
+| Side projects
+| Learning
+```
+
+### Opsi 2: Local Redis (Production-ready)
+
+Install Redis di komputer lu:
+
+```bash
+# macOS
+brew install redis
+brew services start redis
+
+# Ubuntu/Debian
+sudo apt update
+sudo apt install redis-server
+sudo systemctl start redis
+
+# Docker
+docker run -d -p 6379:6379 redis:alpine
+```
+
+## Setup dengan Upstash Redis
+
+Oke, gue rekomendasiin pake Upstash buat development. Gratis dan nggak ribet.
+
+### Step 1: Buat Akun Upstash
+
+1. Buka [upstash.com](https://upstash.com)
+2. Klik **Get Started** | Sign up with GitHub
+3. Klik **Create Database**
+4. Pilih:
+   - **Database Name**: `my-app-queue`
+   - **Region**: Pilih yang terdekat (Singapore for Indonesia)
+   - **Type**: **Global** (recommended buat production)
+
+```
+Database created!
+| Database Name: my-app-queue
+| Endpoint: https://abc123.upstash.io
+| Token: <your-token-here>
+```
+
+**PENTING**: Copy token-nya. Lo bakal butuh ini nanti.
+
+### Step 2: Install Dependencies
+
+```bash
+# Di project folder lu
+npm install bullmq ioredis
+npm install -D @types/node
+```
+
+### Step 3: Setup Queue Connection
+
+```javascript
+// lib/queue.ts
+import { Queue } from 'bullmq';
+import Redis from 'ioredis';
+
+// Connection configuration
+const connection = new Redis({
+  host: 'abc123.upstash.io',  // dari Upstash dashboard
+  port: 6379,
+  password: 'your-token-here', // dari Upstash dashboard
+  maxRetriesPerRequest: null, // Required for BullMQ
+});
+
+// Create queues
+export const emailQueue = new Queue('email', { connection });
+export const pdfQueue = new Queue('pdf-generation', { connection });
+export const exportQueue = new Queue('data-export', { connection });
+
+console.log('Queue connection established!');
+```
+
+### Step 4: Environment Variables
+
+```bash
+# .env
+# Upstash Redis
+REDIS_HOST=abc123.upstash.io
+REDIS_PORT=6379
+REDIS_PASSWORD=your-token-here
+
+# Atau pake REDIS_URL (single string)
+REDIS_URL=redis://default:your-token-here@abc123.upstash.io:6379
+```
+
+```javascript
+// lib/queue.ts | Updated with env vars
+import { Queue } from 'bullmq';
+import Redis from 'ioredis';
+
+const connection = new Redis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+});
+
+export const emailQueue = new Queue('email', { connection });
+```
+
+## Setup dengan Local Redis
+
+Kalo lo mau pake local Redis:
+
+```javascript
+// lib/queue.ts | Local Redis version
+import { Queue } from 'bullmq';
+
+const connection = {
+  host: 'localhost',
+  port: 6379,
+};
+
+export const emailQueue = new Queue('email', { connection });
+```
+
+Simpel. Tanpa password, tanpa SSL.
+
+## Setup Queue untuk Email OTP
+
+Sekarang gue bakal bikin queue spesifik buat kirim email OTP. Ini use case yang common dan masuk akal buat background jobs.
+
+### Step 1: Define Job Data Structure
+
+```typescript
+// types/email.ts
+export interface EmailJobData {
+  to: string;
+  subject: string;
+  template: 'otp' | 'welcome' | 'password-reset';
+  data: {
+    otp?: string;
+    name?: string;
+    resetLink?: string;
+  };
+}
+
+export interface OTPPayload {
+  to: string;
+  otp: string;
+  name: string;
+}
+```
+
+### Step 2: Create Queue dengan Options
+
+```typescript
+// lib/queue/email.queue.ts
+import { Queue, QueueOptions } from 'bullmq';
+import Redis from 'ioredis';
+
+const connection = new Redis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,
+});
+
+// Queue options
+const queueOptions: QueueOptions = {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,           // Retry 3 kali kalo gagal
+    backoff: {
+      type: 'exponential', // Exponential backoff
+      delay: 1000,         // Start dari 1 detik
+    },
+    removeOnComplete: {
+      age: 3600,           // Hapus job setelah 1 jam
+      count: 1000,          // Atau setelah 1000 jobs
+    },
+    removeOnFail: {
+      age: 86400,           // Simpan failed job 24 jam
+    },
+  },
+};
+
+export const emailQueue = new Queue('email-send', queueOptions);
+
+// Helper function buat add job
+export async function addEmailJob(data: {
+  to: string;
+  subject: string;
+  template: string;
+  data: Record<string, any>;
+}) {
+  const job = await emailQueue.add(
+    `email-${data.template}-${Date.now()}`,
+    data,
+    {
+      priority: 1, // 1 = highest priority
+      jobId: `email-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    }
+  );
+
+  console.log(`Email job added: ${job.id}`);
+  return job;
+}
+```
+
+### Step 3: Add Jobs dari API Endpoint
+
+```typescript
+// app/controllers/auth.controller.ts
+import { addEmailJob } from '../lib/queue/email.queue';
+import { generateOTP } from '../utils/otp';
+import { User } from '../models/user';
+
+// Register dengan background email
+export async function register(req: Request, res: Response) {
+  const { email, password, name } = req.body;
+
+  // 1. Validate
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: 'Missing fields' });
+  }
+
+  // 2. Check existing
+  const existing = await User.findOne({ email });
+  if (existing) {
+    return res.status(400).json({ error: 'Email already registered' });
+  }
+
+  // 3. Create user
+  const user = await User.create({ email, password, name });
+
+  // 4. Generate OTP
+  const otp = generateOTP();
+
+  // 5. Save OTP to database (temporary)
+  await OTP.create({
+    userId: user.id,
+    code: otp,
+    expiresAt: Date.now() + 10 * 60 * 1000, // 10 menit
+  });
+
+  // 6. Add to email queue (FAST! langsung proceed)
+  await addEmailJob({
+    to: email,
+    subject: 'Verify your email',
+    template: 'otp',
+    data: {
+      name,
+      otp,
+    },
+  });
+
+  // 7. Respond immediately
+  res.json({
+    success: true,
+    message: 'Registration successful. Check your email for OTP.',
+    // Jangan kirim OTP di response untuk security!
+  });
+}
+```
+
+Perhatiin bedanya:
+
+```typescript
+// ❌ Without queue | User nunggu 3 detik
+await sendEmail({ to: email, otp }); // 3 detik
+res.json({ success: true });
+
+// ✅ With queue | User nunggu 50ms
+await addEmailJob({ to: email, otp }); // 50ms
+res.json({ success: true });
+```
+
+Lo bikin user nunggu 3 detik cuma buat ngirim email? Nggak fair kan? Sekarang, nggak.
+
+## Setup Queue buat PDF Generation
+
+Contoh lain: generate PDF yang bisa makan waktu 10-30 detik.
+
+```typescript
+// lib/queue/pdf.queue.ts
+import { Queue, QueueOptions } from 'bullmq';
+import Redis from 'ioredis';
+
+const connection = new Redis(process.env.REDIS_URL!, {
+  maxRetriesPerRequest: null,
+});
+
+export const pdfQueue = new Queue('pdf-generation', {
+  connection,
+  defaultJobOptions: {
+    attempts: 2, // PDF generation biasanya nggak perlu 3x retry
+    backoff: {
+      type: 'fixed',
+      delay: 5000, // 5 detik delay
+    },
+    removeOnComplete: true,
+    removeOnFail: 5000, // Simpan 5000 failed jobs max
+  },
+});
+
+export interface PDFJobData {
+  userId: string;
+  reportType: 'invoice' | 'summary' | 'export';
+  dateRange: {
+    start: Date;
+    end: Date;
+  };
+  format: 'pdf' | 'excel';
+}
+
+export async function addPDFJob(data: PDFJobData) {
+  return await pdfQueue.add('generate', data, {
+    jobId: `pdf-${Date.now()}`,
+  });
+}
+```
+
+```typescript
+// API endpoint
+app.post('/reports/generate', async (req, res) => {
+  const { reportType, dateRange, format } = req.body;
+
+  // Validate user subscription
+  const user = await getUser(req.user.id);
+  if (!user.hasProAccess) {
+    return res.status(403).json({ error: 'Upgrade to Pro for PDF exports' });
+  }
+
+  // Add to queue
+  const job = await addPDFJob({
+    userId: req.user.id,
+    reportType,
+    dateRange,
+    format,
+  });
+
+  // Return job ID buat polling
+  res.json({
+    jobId: job.id,
+    status: 'processing',
+    message: 'Report is being generated. Check status with the job ID.',
+  });
+});
+```
+
+## Monitoring Queue dengan BullMQ UI
+
+Lo bisa monitoring queues lu lewat UI. BullMQ menyediakan CLI buat start dashboard:
+
+```bash
+npx bullmq:ui
+```
+
+Atau setup manual dengan Docker:
+
+```yaml
+# docker-compose.yml
+version: '3'
+
+services:
+  # ... existing services ...
+
+  bullmq-ui:
+    image: bullmq/bullmq-ui:latest
+    ports:
+      - "3000:3000"
+    environment:
+      REDIS_HOST: abc123.upstash.io
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: your-token-here
+      API_KEY: your-api-key
+```
+
+Tapi kalo lo mau simple, gue saranin pake **Bull Board**:
+
+```bash
+npm install @bull-board/api @bull-board/express
+```
+
+```typescript
+// server/monitoring.ts
+import { createBullBoard } from '@bull-board/api';
+import { BullAdapter } from '@bull-board/api/bullAdapter';
+import { ExpressAdapter } from '@bull-board/express';
+import { emailQueue } from '../lib/queue/email.queue';
+import { pdfQueue } from '../lib/queue/pdf.queue';
+
+// Setup adapters
+const emailQueueAdapter = new BullAdapter(emailQueue);
+const pdfQueueAdapter = new BullAdapter(pdfQueue);
+
+// Create board
+const board = createBullBoard({
+  queues: [emailQueueAdapter, pdfQueueAdapter],
+  serverAdapter: new ExpressAdapter(),
+});
+
+// Mount di Express
+board.setBasePath('/admin/queues');
+app.use('/admin/queues', board.serverAdapter.router);
+
+console.log('Bull Board available at /admin/queues');
+```
+
+Sekarang lo bisa akses `http://localhost:3000/admin/queues` buat liat:
+- Jobs in queue
+- Failed jobs
+- Retry jobs
+- Job stats
+
+## Job Lifecycle di BullMQ
+
+Penting buat lo paham lifecycle sebuah job:
+
+```
+Job States:
+
+WAITING ──▶ ACTIVE ──▶ COMPLETED
+  │            │
+  │            │
+  │            ▼
+  │          FAILED ──▶ RETRY (if attempts left) ──▶ WAITING
+  │            │
+  │            │
+  │            └──▶ DEAD (attempts exhausted)
+
+Other states:
+| DELAYED | Job waiting to be processed (scheduled for future)
+| PAUSED  | Queue is paused, jobs not processed
+```
+
+```typescript
+// Check job status
+const job = await emailQueue.getJob('job-id');
+
+switch (job.status) {
+  case 'waiting':
+    console.log('Job is queued and waiting');
+    break;
+  case 'active':
+    console.log('Job is currently being processed');
+    break;
+  case 'completed':
+    console.log('Job finished successfully');
+    console.log('Result:', job.returnvalue);
+    break;
+  case 'failed':
+    console.log('Job failed:', job.failedReason);
+    console.log('Attempts:', job.attemptsMade);
+    break;
+  case 'delayed':
+    console.log('Job scheduled for future');
+    break;
+}
+```
+
+## Advanced: Job Options
+
+BullMQ punya banyak options buat handle berbagai scenario:
+
+```typescript
+// Scheduled job | jalan di waktu tertentu
+await emailQueue.add(
+  'daily-summary',
+  { userId: '123' },
+  {
+    repeat: {
+      pattern: '0 9 * * *', // Every day at 9 AM
+      tz: 'Asia/Jakarta',
+    },
+  }
+);
+
+// Priority job | proses duluan
+await emailQueue.add(
+  'urgent-notification',
+  { userId: '123', message: 'Urgent!' },
+  {
+    priority: 1, // Highest priority (lower = higher priority)
+  }
+);
+
+// Delayed job | jalan setelah X waktu
+await emailQueue.add(
+  'reminder',
+  { userId: '123', message: 'Don\'t forget!' },
+  {
+    delay: 3600000, // 1 hour delay
+  }
+);
+
+// Bulk add jobs
+const jobs = await emailQueue.addBulk([
+  { name: 'email-1', data: { to: 'user1@test.com' } },
+  { name: 'email-2', data: { to: 'user2@test.com' } },
+  { name: 'email-3', data: { to: 'user3@test.com' } },
+]);
+```
+
+## Kesimpulan
+
+Di part ini, lo udah:
+
+**Setup Redis dan BullMQ:**
+- Pake Upstash Redis (cloud, free tier) atau Local Redis
+- Install BullMQ dan ioredis
+- Setup queue connection dengan proper config
+
+**Create Queues:**
+- Email queue dengan retry options
+- PDF queue untuk report generation
+- Environment variables setup
+
+**Understand Queue Flow:**
+- Add jobs dari API endpoint
+- Job lifecycle states
+- Bull Board buat monitoring
+
+Di Part 3, gue bakal tunjukin gimana bikin **Worker** yang actual process jobs dari queue. Worker ini yang bakal handle:
+- Email sending
+- PDF generation
+- Retry logic
+- Error handling
+- Logging
+
+See you di Part 3!
+
+---
+
+*Previous: [Part 1] Konsep Dasar Background Jobs*
+*Next: [Part 3] Bikin Worker dan Process Jobs*

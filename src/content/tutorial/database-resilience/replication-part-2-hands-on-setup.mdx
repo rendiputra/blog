@@ -1,0 +1,706 @@
+---
+title: "Part 2: Hands-on Setup Replication di PostgreSQL & MySQL dengan 2 VPS"
+description: "Tutorial step-by-step setup Master-Slave replication di PostgreSQL dan MySQL. Lo bakal konfigurasi 2 VPS, setup streaming replication, dan verify data ke-synchronized antar server."
+pubDate: 2026-08-25
+tags: ["database", "replication", "postgresql", "mysql", "high-availability", "master-slave", "devops", "vps"]
+series: "Jangan Sampai Database Lu Down"
+order: 2
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200&h=630&fit=crop"
+---
+
+Di Part 1, lo udah paham kenapa replication itu penting dan gimana cara kerjanya. Sekarang, gue bakal tunjukin hands-on implementation.
+
+Lo bakal setup Master-Slave replication dengan 2 VPS:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Setup Configuration                        │
+│                                                              │
+│   VPS 1 (Master)                                            │
+│   - IP: 192.168.1.100                                      │
+│   - Ubuntu 22.04                                           │
+│   - PostgreSQL 15                                           │
+│   - Accept writes                                           │
+│                                                              │
+│   VPS 2 (Slave)                                             │
+│   - IP: 192.168.1.101                                      │
+│   - Ubuntu 22.04                                           │
+│   - PostgreSQL 15                                           │
+│   - Accept reads (replicated from Master)                   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Prerequisites
+
+Lo butuh:
+
+```
+Requirements:
+| 1. 2 VPS dengan Ubuntu 22.04 (atau Debian-based)
+| 2. Root access ke kedua VPS
+| 3. Basic Linux command knowledge
+| 4. ~30 menit waktu
+```
+
+## Part A: PostgreSQL Replication Setup
+
+Oke, mulai dengan PostgreSQL.
+
+### Step 1: Install PostgreSQL di Kedua Server
+
+**Di Master Server:**
+
+```bash
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Install PostgreSQL
+sudo apt install postgresql postgresql-contrib -y
+
+# Start dan enable PostgreSQL
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Verify installation
+sudo -u postgres psql --version
+# Output: psql (PostgreSQL) 15.x
+```
+
+**Di Slave Server:** (langkah yang sama)
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install postgresql postgresql-contrib -y
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+```
+
+### Step 2: Konfigurasi Master Server
+
+Lo perlu edit `postgresql.conf` dan `pg_hba.conf` di Master.
+
+```bash
+# Edit PostgreSQL config
+sudo nano /etc/postgresql/15/main/postgresql.conf
+```
+
+Ubah/aktivasi settings ini:
+
+```ini
+# /etc/postgresql/15/main/postgresql.conf
+
+# Listen on all interfaces
+listen_addresses = '*'
+
+# Enable replication
+wal_level = replica
+
+# How many standbys (slaves) allowed
+max_wal_senders = 3
+
+# WAL kept for standby (足够 untuk hold recent WAL)
+wal_keep_size = 1GB
+
+# Enable hot standby (slave bisa read-only)
+hot_standby = on
+
+# Optional: archive mode (for backup)
+# archive_mode = on
+# archive_command = 'cp %p /var/lib/postgresql/archived_wal/%f'
+```
+
+Sekarang configure `pg_hba.conf` buat allow replication connections:
+
+```bash
+sudo nano /etc/postgresql/15/main/pg_hba.conf
+```
+
+Tambahin di akhir file:
+
+```bash
+# Allow replication connections from slaves
+# Format: local  replication  postgres                       peer
+#         host   replication  postgres     192.168.1.101/32  scram-sha-256
+
+# Local replication (from same server)
+local  replication  all                     trust
+host   replication  all                     127.0.0.1/32    trust
+host   replication  all                     ::1/128         trust
+
+# Remote replication (from slave servers)
+host   replication  repl_user  192.168.1.101/32  scram-sha-256
+host   replication  repl_user  10.0.0.0/8      scram-sha-256
+```
+
+### Step 3: Buat Replication User di Master
+
+```bash
+# Login sebagai postgres user
+sudo -u postgres psql
+
+# Create replication user
+CREATE USER repl_user WITH REPLICATION ENCRYPTED PASSWORD 'repl_secure_password_123';
+
+# Verify
+\du repl_user
+
+# Exit psql
+\q
+```
+
+### Step 4: Restart Master PostgreSQL
+
+```bash
+sudo systemctl restart postgresql
+sudo systemctl status postgresql
+```
+
+### Step 5: Setup Slave Server
+
+Di Slave, lo perlu configure dan initiate base backup dari Master.
+
+```bash
+# Stop PostgreSQL dulu
+sudo systemctl stop postgresql
+
+# Backup existing data directory (just in case)
+sudo mv /var/lib/postgresql/15/main /var/lib/postgresql/15/main.bak
+
+# Create new data directory
+sudo mkdir -p /var/lib/postgresql/15/main
+sudo chown postgres:postgres /var/lib/postgresql/15/main
+sudo chmod 700 /var/lib/postgresql/15/main
+```
+
+### Step 6: Configure Slave PostgreSQL
+
+```bash
+sudo nano /etc/postgresql/15/main/postgresql.conf
+```
+
+```ini
+# /etc/postgresql/15/main/postgresql.conf
+
+# Listen on all interfaces
+listen_addresses = '*'
+
+# Enable hot standby (this is a standby/replica)
+hot_standby = on
+
+# Point to master
+primary_conninfo = 'host=192.168.1.100 port=5432 user=repl_user password=repl_secure_password_123 application_name=slave1'
+
+# Standby mode
+hot_standby = on
+```
+
+### Step 7: Initiate Base Backup dari Master
+
+Jalankan di **Slave server**:
+
+```bash
+# Login sebagai postgres user
+sudo -u postgres pg_basebackup -h 192.168.1.100 -U repl_user -D /var/lib/postgresql/15/main -P -Xs -R
+
+# Explanation:
+# -h 192.168.1.100 | Master host
+# -U repl_user | Replication user
+# -D /var/lib/postgresql/15/main | Destination directory
+# -P | Show progress
+# -Xs | Stream WAL during backup (required for streaming replication)
+# -R | Create standby.signal file (marks this as a standby)
+```
+
+Output yang diharapkan:
+
+```
+Password for user repl_user:
+Performing Backup
+Backup destination: /var/lib/postgresql/15/main
+Backup has been successfully copied to the destination.
+```
+
+### Step 8: Set Permissions
+
+```bash
+sudo chown -R postgres:postgres /var/lib/postgresql/15/main
+sudo chmod 700 /var/lib/postgresql/15/main
+```
+
+### Step 9: Start Slave PostgreSQL
+
+```bash
+sudo systemctl start postgresql
+sudo systemctl status postgresql
+```
+
+### Step 10: Verify Replication
+
+**Di Master Server:**
+
+```bash
+sudo -u postgres psql
+
+# Check replication status
+SELECT * FROM pg_stat_replication;
+
+# Output:
+#  pid  | usesysid | usename  | application_name | client_addr  | state  | sent_lsn  | write_lsn
+# ------+----------+---------+----------------+-------------+--------+-----------+-----------
+# 12345 |  16384  | repl_user| slave1          | 192.168.1.101 | streaming | 0/3000000 | 0/3000000
+
+\q
+```
+
+Kalo ada row yang muncul, replication udah jalan!
+
+**Di Slave Server:**
+
+```bash
+sudo -u postgres psql
+
+# Check if this is a standby
+SELECT pg_is_in_recovery();
+
+# Output:
+#  pg_is_in_recovery
+# -------------------
+#  t
+# (1 row)
+# = t means YES, this is a standby (slave)
+```
+
+## Part B: MySQL Replication Setup
+
+Sekarang setup yang sama dengan MySQL.
+
+### Step 1: Install MySQL di Kedua Server
+
+**Di Master Server:**
+
+```bash
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Install MySQL
+sudo apt install mysql-server -y
+
+# Secure installation
+sudo mysql_secure_installation
+
+# Start dan enable
+sudo systemctl start mysql
+sudo systemctl enable mysql
+
+# Verify
+mysql --version
+```
+
+**Di Slave Server:** (langkah yang sama)
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install mysql-server -y
+sudo mysql_secure_installation
+sudo systemctl start mysql
+sudo systemctl enable mysql
+```
+
+### Step 2: Konfigurasi Master Server
+
+```bash
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+```
+
+```ini
+[mysqld]
+
+# Server ID (unique per server)
+server-id = 1
+
+# Enable binary logging (required for replication)
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_do_db = myapp_database
+
+# Sync binlog to disk (safety)
+sync_binlog = 1
+
+# GTID mode (optional, makes replication easier to manage)
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Binlog retention (7 days)
+expire_logs_days = 7
+
+# Read/write config
+max_connections = 200
+```
+
+### Step 3: Buat Replication User di Master
+
+```bash
+sudo mysql
+
+# Create replication user
+CREATE USER 'repl_user'@'192.168.1.101' IDENTIFIED WITH mysql_native_password BY 'repl_secure_password_123';
+GRANT REPLICATION SLAVE ON *.* TO 'repl_user'@'192.168.1.101';
+
+# Create database (if not exists)
+CREATE DATABASE IF NOT EXISTS myapp_database;
+GRANT ALL PRIVILEGES ON myapp_database.* TO 'app_user'@'%';
+FLUSH PRIVILEGES;
+```
+
+### Step 4: Get Master Status
+
+```bash
+# Get current binary log position
+SHOW MASTER STATUS;
+
+# Output:
+# +------------------+----------+--------------+------------------+
+# | File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
+# +------------------+----------+--------------+------------------+
+# | mysql-bin.000001 |     154 | myapp_database |                  |
+# +------------------+----------+--------------+------------------+
+
+# Note: File = mysql-bin.000001, Position = 154
+# Lo bakal butuh ini buat setup slave
+```
+
+### Step 5: Configure Slave Server
+
+```bash
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+```
+
+```ini
+[mysqld]
+
+# Server ID (unique, different from master)
+server-id = 2
+
+# Enable relay log
+relay_log = /var/log/mysql/mysql-relay-bin
+
+# Enable read-only (slave only)
+read_only = ON
+super_read_only = ON
+
+# GTID mode
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Skip specific databases from replication
+replicate-wild-ignore-table = mysql.%
+```
+
+### Step 6: Setup Replication di Slave
+
+```bash
+sudo mysql
+
+# Stop slave if already running
+STOP SLAVE;
+
+# Configure master information
+CHANGE MASTER TO
+    MASTER_HOST='192.168.1.100',
+    MASTER_USER='repl_user',
+    MASTER_PASSWORD='repl_secure_password_123',
+    MASTER_AUTO_POSITION=1;
+
+# Start replication
+START SLAVE;
+
+# Check status
+SHOW SLAVE STATUS\G
+```
+
+Output yang diharapkan:
+
+```yaml
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+Seconds_Behind_Master: 0
+```
+
+### Step 7: Verify Replication
+
+**Test buat nambahin data di Master:**
+
+```bash
+# Di Master
+sudo mysql
+
+INSERT INTO myapp_database.users (name, email) VALUES ('Test User', 'test@example.com');
+SELECT * FROM myapp_database.users;
+```
+
+**Cek di Slave:**
+
+```bash
+# Di Slave
+sudo mysql
+
+SELECT * FROM myapp_database.users;
+```
+
+Kalo data yang lo insert di Master muncul di Slave, replication working!
+
+## Testing the Setup
+
+Sekarang lo bakal test failover scenario.
+
+### Test 1: Verify Data Sync
+
+**Di Master:**
+
+```sql
+-- Create test database
+CREATE DATABASE test_replication;
+USE test_replication;
+
+-- Create table
+CREATE TABLE test_table (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert data
+INSERT INTO test_table (name) VALUES ('Master Data 1');
+INSERT INTO test_table (name) VALUES ('Master Data 2');
+
+-- Verify
+SELECT * FROM test_table;
+```
+
+**Di Slave:**
+
+```sql
+USE test_replication;
+SELECT * FROM test_table;
+```
+
+Data harusnya muncul di Slave.
+
+### Test 2: Verify Lag Monitoring
+
+**PostgreSQL - Check lag:**
+
+```sql
+-- Di Master
+SELECT client_addr, state, sent_lsn, write_lsn,
+       replay_lsn,
+       (sent_lsn - replay_lsn) AS replication_lag
+FROM pg_stat_replication;
+```
+
+**MySQL - Check lag:**
+
+```sql
+SHOW SLAVE STATUS\G
+```
+
+Cek field `Seconds_Behind_Master`:
+- 0 | Perfect, no lag
+- 1-60 | Small lag (acceptable)
+- 60+ | Large lag (needs investigation)
+
+### Test 3: Simulate Master Down
+
+**Test ini cuma buat verification, jangan dilakukan di production!**
+
+**Di Master (stop MySQL/PostgreSQL):**
+
+```bash
+# Simulate master failure
+sudo systemctl stop mysql
+# atau untuk PostgreSQL:
+# sudo systemctl stop postgresql
+```
+
+**Di Slave (cek status):**
+
+```bash
+# MySQL - Slave tetep running
+sudo mysql
+
+SHOW SLAVE STATUS\G
+# Slave_IO_Running: No
+# Slave_SQL_Running: Yes
+# Last_IO_Error: timeout...
+```
+
+Ini menunjukkan Slave detect Master is down.
+
+## Monitoring Replication
+
+Lo harus monitor replication secara continues.
+
+### PostgreSQL Monitoring Script
+
+```bash
+#!/bin/bash
+# check_replication.sh
+
+echo "=== PostgreSQL Replication Status ==="
+
+sudo -u postgres psql -c "SELECT client_addr, state, sent_lsn,
+    write_lsn, replay_lsn,
+    (sent_lsn - replay_lsn) AS lag_lsn,
+    (sent_lsn - replay_lsn) / 1024 / 1024 AS lag_mb
+FROM pg_stat_replication;"
+
+echo ""
+echo "=== Lag Warning ==="
+sudo -u postgres psql -c "SELECT
+    CASE
+        WHEN (sent_lsn - replay_lsn) > 16 * 1024 * 1024 THEN 'CRITICAL: Lag > 16MB'
+        WHEN (sent_lsn - replay_lsn) > 1024 * 1024 THEN 'WARNING: Lag > 1MB'
+        ELSE 'OK: Lag normal'
+    END AS status
+FROM pg_stat_replication;"
+```
+
+### MySQL Monitoring Script
+
+```sql
+-- MySQL monitoring query
+SHOW SLAVE STATUS\G
+```
+
+Key metrics:
+- `Slave_IO_Running` | Should be "Yes"
+- `Slave_SQL_Running` | Should be "Yes"
+- `Seconds_Behind_Master` | Should be 0 or low
+- `Last_IO_Error` | Should be empty
+- `Last_SQL_Error` | Should be empty
+
+## Common Issues dan Troubleshooting
+
+### Issue 1: Connection Refused
+
+```
+Error:
+FATAL: no pg_hba.conf entry for host '192.168.1.101'
+
+Solution:
+Check pg_hba.conf di Master:
+- Pastikan ada entry untuk Slave IP
+- Pastikan password auth atau trust configured
+- Restart PostgreSQL after changes
+```
+
+### Issue 2: WALsegments Not Available
+
+```
+Error:
+ERROR: requested WAL segment has already been removed
+
+Solution:
+- Increase wal_keep_size di Master
+- Atau setup archive_mode untuk persist WAL
+- Slave perlu catch up sebelum WAL cleaned
+```
+
+### Issue 3: Replication Lag Increasing
+
+```
+Error:
+Seconds_Behind_Master increasing continuously
+
+Solution:
+- Check network latency between servers
+- Check Slave hardware (disk I/O, CPU)
+- Consider using faster storage (SSD)
+- Reduce Master write load
+```
+
+### Issue 4: Duplicate Server ID
+
+```
+Error:
+FATAL: multiple盆plications of replication with same server_id
+
+Solution:
+- Pastikan setiap server punya unique server_id
+- Check my.ini/my.cnf
+```
+
+## Automation Script
+
+Ini script buat auto-check replication status:
+
+```bash
+#!/bin/bash
+# /opt/scripts/check-replication.sh
+
+# PostgreSQL check
+echo "=== PostgreSQL Replication ==="
+STATUS=$(sudo -u postgres psql -t -c "SELECT COUNT(*) FROM pg_stat_replication WHERE state = 'streaming';")
+
+if [ "$STATUS" -gt "0" ]; then
+    echo "OK: Replication active ($STATUS slave(s))"
+    sudo -u postgres psql -c "SELECT client_addr, state, sent_lsn - replay_lsn AS lag_bytes FROM pg_stat_replication;"
+else
+    echo "CRITICAL: No active replication!"
+fi
+
+# MySQL check
+echo ""
+echo "=== MySQL Replication ==="
+MYSQL_STATUS=$(sudo mysql -N -e "SHOW SLAVE STATUS\G" | grep "Slave_IO_Running:" | awk '{print $2}')
+
+if [ "$MYSQL_STATUS" == "Yes" ]; then
+    echo "OK: IO Thread running"
+else
+    echo "CRITICAL: IO Thread not running!"
+fi
+```
+
+## Kesimpulan
+
+Lo udah berhasil setup Master-Slave replication!
+
+**Yang udah lo pelajarin:**
+
+```
+Part 2 Summary:
+
+PostgreSQL Setup:
+| 1. Install PostgreSQL di Master dan Slave
+| 2. Configure postgresql.conf (wal_level, max_wal_senders)
+| 3. Configure pg_hba.conf (allow replication)
+| 4. Create replication user
+| 5. pg_basebackup dari Master ke Slave
+| 6. Configure Slave (primary_conninfo)
+| 7. Verify replication
+
+MySQL Setup:
+| 1. Install MySQL di Master dan Slave
+| 2. Configure server-id dan log_bin
+| 3. Create replication user
+| 4. Get Master status (binlog position)
+| 5. Configure Slave
+| 6. CHANGE MASTER TO
+| 7. START SLAVE
+| 8. Verify replication
+
+Monitoring:
+| - pg_stat_replication (PostgreSQL)
+| - SHOW SLAVE STATUS (MySQL)
+| - Lag monitoring
+| - Automated checks
+```
+
+Di Part 3, gue bakal tunjukin gimana integrate replication ini ke aplikasi lu. Lo bakal setup read/write splitting di ORMs biar aplikasi lu automatically route queries ke database yang bener.
+
+See you di Part 3!
+
+---
+
+*Previous: [Part 1] Konsep Replication*
+*Next: [Part 3] Application Integration dengan Read/Write Splitting*
